@@ -109,15 +109,21 @@ void AutoAcquisition::Refresh(const std::vector<DeviceSnapshot> &devices)
 	candidates = std::move(nextCandidates);
 }
 
+bool AutoAcquisition::ObserveConfigured(double time, const vr::TrackedDevicePose_t *observed, const ObservationSpace &space)
+{
+	if (!space.HasConfiguration())
+		return false;
+	auto poses = space.RawPoses(observed);
+	Observe(time, poses.data());
+	return true;
+}
+
 void AutoAcquisition::Observe(double time, const vr::TrackedDevicePose_t *poses)
 {
-	bool expired = false;
 	for (auto &pair : pairs)
-		expired = pair.sampler.ExpireBefore(time - 180.0) || expired;
+		pair.sampler.ExpireBefore(time - 180.0);
 	for (auto &candidate : candidates)
-		expired = candidate.sampler.ExpireBefore(time - 180.0, true) || expired;
-	if (expired)
-		++epoch;
+		candidate.sampler.ExpireBefore(time - 180.0, true);
 	const auto &hmd = poses[vr::k_unTrackedDeviceIndex_Hmd];
 	Pose head(hmd.mDeviceToAbsoluteTracking);
 	bool headValid = hmd.bPoseIsValid && head.Finite();

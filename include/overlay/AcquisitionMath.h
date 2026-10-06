@@ -41,6 +41,7 @@ Eigen::Matrix3d MeanRotation(const std::vector<Eigen::Matrix3d> &rotations);
 double RotationInformation(const std::vector<Eigen::Matrix3d> &rotations);
 ErrorStats Statistics(std::vector<double> values);
 bool IsHoldout(size_t index);
+double DampedYawStep(double numerator, double information);
 
 struct HandPair
 {
