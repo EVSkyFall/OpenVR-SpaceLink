@@ -3,6 +3,7 @@
 #pragma once
 
 #include <Windows.h>
+#include <string>
 
 #include "Protocol.h"
 
@@ -11,7 +12,10 @@ class IPCClient
 public:
 	~IPCClient();
 
-	void Connect();
+	bool Connect(double time = 0);
+	void Disconnect(const std::string &error, double time);
+	bool Connected() const { return pipe != INVALID_HANDLE_VALUE; }
+	const std::string &LastError() const { return lastError; }
 	protocol::Response SendBlocking(const protocol::Request &request);
 
 	void Send(const protocol::Request &request);
@@ -21,4 +25,6 @@ private:
 	void ConnectInternal();
 
 	HANDLE pipe = INVALID_HANDLE_VALUE;
+	std::string lastError;
+	double nextAttempt = 0, retryDelay = 1;
 };

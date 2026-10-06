@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+#pragma once
+
+#include "DesiredState.h"
+#include "SamplerPolicy.h"
+
+#include <array>
+#include <optional>
+
+namespace acquisition
+{
+
+struct CandidateEvidence
+{
+	uint32_t id = 0;
+	std::string serial, system;
+	uint64_t count = 0;
+	Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
+	bool heightCertain = false;
+};
+
+struct CandidateFrames
+{
+	CandidateEvidence candidate;
+	std::vector<Sample> samples;
+};
+
+struct Hypothesis
+{
+	std::string system;
+	std::vector<HandPair> pairs;
+	std::vector<CandidateFrames> candidates;
+};
+
+struct Evaluation
+{
+	int handPairs = 0;
+	std::vector<CandidateEvidence> passing;
+};
+
+Evaluation Evaluate(const std::vector<Hypothesis> &hypotheses);
+
+class Confirmation
+{
+public:
+	std::optional<CandidateEvidence> Update(const Evaluation &evaluation);
+	void Reset() { previous.reset(); }
+
+private:
+	std::optional<CandidateEvidence> previous;
+};
+
+class AutoAcquisition
+{
+public:
+	void Refresh(const std::vector<DeviceSnapshot> &devices);
+	void Observe(double time, const vr::TrackedDevicePose_t *poses);
+	std::vector<Hypothesis> Snapshot() const;
+	void Clear();
+	void ResetConfirmations() { confirmation.Reset(); }
+	std::optional<CandidateEvidence> Confirm(const Evaluation &evaluation, uint64_t evaluatedEpoch) {
+		return evaluatedEpoch == epoch ? confirmation.Update(evaluation) : std::nullopt;
+	}
+	bool HasHands() const { return !pairs.empty(); }
+	uint64_t Epoch() const { return epoch; }
+
+private:
+	struct PairStore
+	{
+		std::string system, handSerial, controllerSerial;
+		uint32_t hand = 0, controller = 0;
+		Sampler sampler;
+	};
+	struct CandidateStore
+	{
+		CandidateEvidence candidate;
+		Sampler sampler;
+	};
+	std::vector<PairStore> pairs;
+	std::vector<CandidateStore> candidates;
+	Confirmation confirmation;
+	uint64_t epoch = 0;
+	bool headsetLost = false;
+};
+
+}
