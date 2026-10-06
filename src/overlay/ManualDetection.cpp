@@ -44,6 +44,7 @@ void ManualDetection::RestartEvidence()
 	candidateSpeeds.assign(candidates.size(), {});
 	hmdSpeeds.clear();
 	prevRot.clear();
+	candidateHavePrev.assign(candidates.size(), false);
 	havePrev = false;
 }
 
@@ -59,6 +60,7 @@ ManualDetection::Result ManualDetection::Observe(double time, const std::vector<
 	if (!poses[0].bPoseIsValid || !hmd.Finite())
 	{
 		havePrev = false;
+		std::fill(candidateHavePrev.begin(), candidateHavePrev.end(), false);
 		return { Event::HeadsetPaused };
 	}
 	if (!started)
@@ -72,28 +74,32 @@ ManualDetection::Result ManualDetection::Observe(double time, const std::vector<
 					serials.push_back(device.serial);
 		started = true;
 		if (candidates.size() == 1)
-			return { Event::Selected, candidates.front() };
+			return { Event::Selected, candidates.front(), serials.front() };
 		RestartEvidence();
 		return { Event::Collecting };
 	}
-	std::vector<Eigen::Matrix3d> rotations{ hmd.rot };
-	for (uint32_t id : candidates)
+	std::vector<Eigen::Matrix3d> rotations(candidates.size() + 1, Eigen::Matrix3d::Identity());
+	rotations[0] = hmd.rot;
+	std::vector<bool> valid(candidates.size(), false);
+	for (size_t i = 0; i < candidates.size(); ++i)
 	{
-		if (id >= vr::k_unMaxTrackedDeviceCount || !poses[id].bPoseIsValid || !acquisition::Pose(poses[id].mDeviceToAbsoluteTracking).Finite())
-		{
-			havePrev = false;
-			return { Event::TrackerPaused };
-		}
-		rotations.push_back(acquisition::Pose(poses[id].mDeviceToAbsoluteTracking).rot);
+		uint32_t id = candidates[i];
+		if (id >= vr::k_unMaxTrackedDeviceCount || !poses[id].bPoseIsValid)
+			continue;
+		acquisition::Pose pose(poses[id].mDeviceToAbsoluteTracking);
+		valid[i] = pose.Finite();
+		if (valid[i])
+			rotations[i + 1] = pose.rot;
 	}
 	double dt = time - prevTime;
 	if (havePrev && dt > 1e-4)
 	{
 		hmdSpeeds.push_back(AngularSpeedBetween(rotations[0], prevRot[0], dt));
 		for (size_t i = 0; i < candidates.size(); ++i)
-			candidateSpeeds[i].push_back(AngularSpeedBetween(rotations[i + 1], prevRot[i + 1], dt));
+			candidateSpeeds[i].push_back(valid[i] && candidateHavePrev[i] ? AngularSpeedBetween(rotations[i + 1], prevRot[i + 1], dt) : 0.0);
 	}
 	prevRot = std::move(rotations);
+	candidateHavePrev = std::move(valid);
 	prevTime = time;
 	havePrev = true;
 	if (hmdSpeeds.size() < 40)
@@ -114,7 +120,7 @@ ManualDetection::Result ManualDetection::Observe(double time, const std::vector<
 			second = std::max(second, correlation);
 	}
 	if (peak >= 0.5 && best >= 0.7 && best - second >= 0.1)
-		return { Event::Selected, candidates[bestIndex] };
+		return { Event::Selected, candidates[bestIndex], serials[bestIndex] };
 	RestartEvidence();
 	return { Event::Collecting };
 }

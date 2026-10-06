@@ -78,7 +78,7 @@ AcquireState DescribeAcquisition(const CalibrationContext &ctx, const Calibratio
 	bool profileReadSucceeded, bool settingsReadSucceeded, bool handsAvailable, int handPairs)
 {
 	if (!ctx.trackerSerial.empty()) return AcquireState::Bound;
-	if (attempt && !attempt->automatic) return AcquireState::Paused;
+	if ((ctx.state != CalibrationState::None || attempt) && !(attempt && attempt->automatic)) return AcquireState::Paused;
 	if (!ctx.autoAcquire) return AcquireState::Off;
 	if (!profileReadSucceeded || !settingsReadSucceeded) return AcquireState::ProfileUnreadable;
 	if (attempt) return AcquireState::Calibrating;
