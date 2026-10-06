@@ -55,6 +55,7 @@ class AutoAcquisition
 {
 public:
 	void Refresh(const std::vector<DeviceSnapshot> &devices);
+	bool ObserveConfigured(double time, const vr::TrackedDevicePose_t *observed, const ObservationSpace &space);
 	void Observe(double time, const vr::TrackedDevicePose_t *poses);
 	std::vector<Hypothesis> Snapshot() const;
 	void Clear();

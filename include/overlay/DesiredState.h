@@ -24,6 +24,7 @@ class ObservationSpace
 {
 public:
 	void Applied(const protocol::Request &command);
+	bool HasConfiguration() const { return haveConfiguration; }
 	std::array<vr::TrackedDevicePose_t, vr::k_unMaxTrackedDeviceCount> RawPoses(const vr::TrackedDevicePose_t *observed) const;
 
 private:

@@ -92,6 +92,11 @@ static Eigen::Matrix3d Yaw(double yaw)
 	return Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitY()).toRotationMatrix();
 }
 
+double DampedYawStep(double numerator, double information)
+{
+	return std::clamp(numerator / (information + 1e-6), -0.2, 0.2);
+}
+
 struct FitRow
 {
 	const Sample *sample;
@@ -205,8 +210,7 @@ SyncResult FitHandPairs(const std::vector<HandPair> &pairs)
 			residual.segment<3>(rows.size() * 3 + 3 * p) = -(0.03 / 0.10) * fit.segment<3>(3 + 3 * p);
 		// Variable projection removes the part of a yaw change that the linear offsets can explain.
 		Eigen::VectorXd projected = derivative - design * design.completeOrthogonalDecomposition().solve(derivative);
-		double denominator = projected.squaredNorm() + 1e-6;
-		yaw += std::clamp(projected.dot(residual) / denominator, -0.2, 0.2);
+		yaw += DampedYawStep(projected.dot(residual), projected.squaredNorm());
 	}
 	Eigen::MatrixXd design;
 	fit = FitLinear(rows, pairs.size(), yaw, weights, &design);

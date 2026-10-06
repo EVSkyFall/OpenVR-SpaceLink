@@ -175,6 +175,10 @@ static void Scenario4()
 	}
 	auto weak = FitHandPairs({ linear });
 	Check(weak.rotation.allFinite() && weak.translation.allFinite() && !weak.held, "unobservable near-linear motion must remain finite and not held");
+	Check(DampedYawStep(1e100, 1e-30) == 0.2 && DampedYawStep(-1e100, 1e-30) == -0.2, "yaw step must clamp huge positive and negative ratios");
+	Check(std::isfinite(DampedYawStep(0, 0)) && DampedYawStep(0, 0) == 0,
+		"yaw damping must keep a zero-information step finite");
+	Check(std::abs(DampedYawStep(1e-20, 1e-30)) < 1e-6, "tiny-information yaw step must retain damping below the clamp");
 }
 
 static std::vector<Sample> HeadSamples(double distance, bool chest = false, bool neckMotion = true, size_t count = 180)
@@ -667,6 +671,17 @@ static void Scenario12()
 	manual.automatic = true;
 	profile.autoAcquire = true;
 	Check(DescribeAcquisition(profile, &manual, true, true, true, 2) == AcquireState::Calibrating, "only an automatic attempt reports Calibrating");
+	auto editing = Profile();
+	editing.trackerSerial.clear();
+	for (auto state : { CalibrationState::Editing, CalibrationState::Begin, CalibrationState::Detect, CalibrationState::WaitForTracker, CalibrationState::Sampling })
+	{
+		editing.state = state;
+		Check(DescribeAcquisition(editing, nullptr, true, true, false, 0) == AcquireState::Paused,
+			"unbound Editing and manual states without an automatic attempt must report Paused");
+	}
+	editing.autoAcquire = false;
+	Check(DescribeAcquisition(editing, nullptr, false, false, false, 0) == AcquireState::Paused,
+		"serial-less Editing must report Paused before off or unreadable status");
 	vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
 	for (const auto &device : Devices())
 		poses[device.id] = TrackedPose(Pose{});
@@ -677,24 +692,76 @@ static void Scenario12()
 	detection.Observe(0.10, devices, poses);
 	auto progress = detection.Progress();
 	poses[5].bPoseIsValid = false;
-	Check(detection.Observe(0.15, devices, poses).event == ManualDetection::Event::TrackerPaused && detection.Progress() == progress, "one candidate blink during Detect must not choose the waist tracker");
+	Check(detection.Observe(0.15, devices, poses).event == ManualDetection::Event::Collecting && detection.Progress() == progress + 1
+		&& detection.Speeds(0).back() == 0, "invalid manual candidate must contribute zero without pausing detection");
 	poses[6].bPoseIsValid = false;
-	Check(detection.Observe(0.20, devices, poses).event == ManualDetection::Event::TrackerPaused && detection.Started(), "all candidates blinking must never return Detect to Begin");
+	Check(detection.Observe(0.20, devices, poses).event == ManualDetection::Event::Collecting && detection.Started()
+		&& detection.Speeds(0).back() == 0 && detection.Speeds(1).back() == 0, "all missing candidates must preserve fixed membership and contribute zeros");
 	poses[6].bPoseIsValid = true;
-	Check(detection.Observe(0.25, devices, poses).event == ManualDetection::Event::TrackerPaused && detection.Serials().size() == 2, "one returning candidate must not enable the singleton shortcut");
-	poses[5].bPoseIsValid = true;
+	Check(detection.Observe(0.25, devices, poses).event == ManualDetection::Event::Collecting && detection.Serials().size() == 2,
+		"one returning candidate must not enable the singleton shortcut");
+	Pose recovered;
+	recovered.rot = Rotation(0, 1.0);
+	poses[5] = TrackedPose(recovered);
 	detection.Observe(0.30, devices, poses);
-	Check(detection.Progress() == progress, "first frame after detection pause must not add evidence");
-	uint32_t selected = vr::k_unTrackedDeviceIndexInvalid;
-	for (int i = 0; i < 50 && selected == vr::k_unTrackedDeviceIndexInvalid; ++i)
+	Check(detection.Speeds(0).back() == 0, "first valid candidate tick must reset its baseline with zero speed");
+	detection.Observe(0.35, devices, poses);
+	Check(detection.Speeds(0).back() < 0.01, "candidate recovery must not leave a delayed rotation spike");
+	Check(detection.Speeds(0).size() == detection.Progress() && detection.Speeds(1).size() == detection.Progress(),
+		"all manual speed histories must remain aligned with HMD evidence");
+	poses[5].mDeviceToAbsoluteTracking.m[0][0] = std::numeric_limits<float>::quiet_NaN();
+	Check(detection.Observe(0.40, devices, poses).event == ManualDetection::Event::Collecting && detection.Speeds(0).back() == 0,
+		"non-finite candidate pose must contribute zero rather than pause detection");
+	poses[5] = TrackedPose(recovered);
+	detection.Observe(0.45, devices, poses);
+	Check(detection.Speeds(0).back() == 0, "candidate baseline must reset after a non-finite pose");
+	poses[0].bPoseIsValid = false;
+	progress = detection.Progress();
+	Check(detection.Observe(0.50, devices, poses).event == ManualDetection::Event::HeadsetPaused && detection.Progress() == progress,
+		"invalid HMD must still pause manual detection");
+	poses[0] = TrackedPose(recovered);
+	detection.Observe(0.55, devices, poses);
+	Check(detection.Progress() == progress, "first HMD recovery tick must only refresh baselines");
+	for (bool blinkHead : { false, true })
+	{
+		ManualDetection active;
+		for (const auto &device : devices) poses[device.id] = TrackedPose(Pose{});
+		active.Observe(0, devices, poses);
+		uint32_t selected = vr::k_unTrackedDeviceIndexInvalid;
+		for (int i = 1; i <= 90 && selected == vr::k_unTrackedDeviceIndexInvalid; ++i)
+		{
+			Pose moving;
+			moving.rot = Rotation(0.25 * std::sin(i * 0.2), 0.45 * std::sin(i * 0.17));
+			poses[0] = poses[5] = TrackedPose(moving);
+			poses[6].bPoseIsValid = blinkHead;
+			if (blinkHead && i == 12) poses[5].bPoseIsValid = false;
+			auto result = active.Observe(i * 0.05, devices, poses);
+			if (blinkHead && (i == 12 || i == 13))
+				Check(result.event == ManualDetection::Event::Collecting && active.Serials().size() == 2 && active.Speeds(0).back() == 0,
+					"head blink and first return must add zero without elimination selection");
+			if (result.event == ManualDetection::Event::Selected) selected = result.id;
+		}
+		Check(selected == 5, blinkHead ? "a one-tick head blink must not prevent correlated selection" : "a permanently invalid candidate must not stall correlated head selection");
+	}
+	ManualDetection unresolved;
+	for (const auto &device : devices) poses[device.id] = TrackedPose(Pose{});
+	unresolved.Observe(0, devices, poses);
+	for (int i = 1; i <= 40; ++i)
 	{
 		Pose moving;
 		moving.rot = Rotation(0.25 * std::sin(i * 0.2), 0.45 * std::sin(i * 0.17));
 		poses[0] = poses[5] = TrackedPose(moving);
-		auto result = detection.Observe(0.35 + i * 0.05, devices, poses);
-		if (result.event == ManualDetection::Event::Selected) selected = result.id;
+		Check(unresolved.Observe(i * 0.05, devices, poses).event == ManualDetection::Event::Collecting,
+			"unresolved selection fixture must retain its first 39 speed samples");
 	}
-	Check(selected == 5, "fixed-list correlation must resume and select the actual head tracker");
+	auto withoutHead = devices;
+	withoutHead.erase(std::remove_if(withoutHead.begin(), withoutHead.end(), [](const DeviceSnapshot &device) { return device.id == 5; }), withoutHead.end());
+	unresolved.Resolve(withoutHead);
+	auto pending = unresolved.Observe(2.05, withoutHead, poses);
+	Check(pending.event == ManualDetection::Event::Selected && pending.id == vr::k_unTrackedDeviceIndexInvalid && pending.serial == "committed-A",
+		"selection must preserve the fixed candidate serial when its index is temporarily unresolved");
+	Check(ResolveSerial(withoutHead, pending.serial) == vr::k_unTrackedDeviceIndexInvalid && ResolveSerial(devices, pending.serial) == 5,
+		"the selected serial must resolve again when its device returns");
 	for (const auto &device : devices) poses[device.id] = TrackedPose(Pose{});
 	devices[1].deviceClass = vr::TrackedDeviceClass_GenericTracker;
 	acquisition.Refresh(devices);
@@ -705,6 +772,25 @@ static void Scenario12()
 	acquisition.Observe(0, poses);
 	acquisition.Observe(0.05, poses);
 	Check(acquisition.Snapshot().front().candidates.front().samples.size() == 1, "auto observer must retain paired HMD/candidate keyframes after two valid ticks");
+	AutoAcquisition linkContinuity;
+	linkContinuity.Refresh(devices);
+	linkContinuity.Observe(0, poses);
+	linkContinuity.Observe(0.05, poses);
+	ObservationSpace missingConfiguration, configured;
+	for (const auto &command : DesiredState(devices, CalibrationContext{}, false)) configured.Applied(command);
+	Check(!missingConfiguration.HasConfiguration() && configured.HasConfiguration(), "observation space must expose configuration availability");
+	auto linkEpoch = linkContinuity.Epoch();
+	auto linkEvidence = evidence;
+	Check(!linkContinuity.Confirm(linkEvidence, linkEpoch), "link continuity fixture starts with one confirmation pass");
+	linkEvidence.passing.front().count += 20;
+	Check(!linkContinuity.ObserveConfigured(0.10, poses, missingConfiguration), "unconfigured observation space must skip observation");
+	Check(linkContinuity.Epoch() == linkEpoch && linkContinuity.Snapshot().front().candidates.front().samples.size() == 1,
+		"driver link loss must preserve the observation epoch and reservoirs");
+	Check(linkContinuity.ObserveConfigured(0.15, poses, configured)
+		&& linkContinuity.Snapshot().front().pairs.front().samples.size() == 1
+		&& linkContinuity.Snapshot().front().candidates.front().samples.size() == 1,
+		"configured observations must resume without a false headset recovery reset");
+	Check(linkContinuity.Confirm(linkEvidence, linkEpoch).has_value(), "driver link loss must preserve confirmation evidence");
 	auto epoch = acquisition.Epoch();
 	acquisition.ResetConfirmations();
 	Check(!acquisition.Confirm(evidence, epoch), "initial current-epoch evidence must remain unconfirmed");
@@ -753,6 +839,21 @@ static void Scenario12()
 		Check(pair.samples.size() == 400, "acquisition hand capacity must be fixed at 400");
 	for (const auto &candidate : filled.front().candidates)
 		Check(candidate.samples.size() == 400, "acquisition candidate capacity must be fixed at 400");
+	auto beforeExpiry = filled.front().candidates.front().candidate;
+	Evaluation earlierPass, pendingEvaluation;
+	pendingEvaluation.passing.push_back(beforeExpiry);
+	pendingEvaluation.passing.front().heightCertain = true;
+	earlierPass = pendingEvaluation;
+	earlierPass.passing.front().count -= 20;
+	acquisition.ResetConfirmations();
+	auto evaluationEpoch = acquisition.Epoch();
+	Check(!acquisition.Confirm(earlierPass, evaluationEpoch), "expiry fixture starts with an earlier confirmation pass");
+	acquisition.Observe(600, poses);
+	auto expired = acquisition.Snapshot();
+	Check(expired.front().candidates.front().samples.empty() && expired.front().candidates.front().candidate.count == beforeExpiry.count,
+		"expiry must remove old samples while retaining monotonic evidence counts");
+	Check(acquisition.Epoch() == evaluationEpoch && acquisition.Confirm(pendingEvaluation, evaluationEpoch).has_value(),
+		"an evaluation launched before expiry must remain confirmable with its captured epoch");
 	PersistenceState storage;
 	auto readRevision = storage.revision;
 	storage.Changed();
