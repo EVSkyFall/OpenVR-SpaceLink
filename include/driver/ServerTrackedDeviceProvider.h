@@ -46,17 +46,8 @@ public:
 	bool HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose);
 
 private:
-	void UpdateDrift(const vr::HmdQuaternion_t &correctedRotation, const double (&correctedPosition)[3],
-		const vr::HmdQuaternion_t &rawRotation, const double (&rawPosition)[3]);
-	void ApplyDrift(vr::DriverPose_t &pose) const;
-
-	double SlamToCorrectedScale() const
-	{
-		double k = hmdTracker.hmdScale > 0.0 ? 1.0 / hmdTracker.hmdScale : 1.0;
-		return hmdTracker.native ? k : k * hmdTracker.calibrationScale;
-	}
-
 	IPCServer server;
+	SRWLOCK stateLock = SRWLOCK_INIT;
 
 	struct DeviceTransform
 	{
@@ -124,4 +115,16 @@ private:
 
 		void reset() { valid = false; filter.reset(); }
 	} headVel;
+
+	static void UpdateDrift(DriftCorrection &drift, double slamScale,
+		const vr::HmdQuaternion_t &correctedRotation, const double (&correctedPosition)[3],
+		const vr::HmdQuaternion_t &rawRotation, const double (&rawPosition)[3]);
+	static void ApplyDrift(vr::DriverPose_t &pose, double slamScale,
+		const vr::HmdQuaternion_t &rotation, const vr::HmdVector3d_t &translation);
+
+	static double SlamToCorrectedScale(const HmdTracker &config)
+	{
+		double k = config.hmdScale > 0.0 ? 1.0 / config.hmdScale : 1.0;
+		return config.native ? k : k * config.calibrationScale;
+	}
 };

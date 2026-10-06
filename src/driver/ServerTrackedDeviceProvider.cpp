@@ -8,6 +8,33 @@
 
 #include <cmath>
 
+namespace
+{
+	class SharedLock
+	{
+	public:
+		explicit SharedLock(SRWLOCK &lock) : lock(lock) { AcquireSRWLockShared(&lock); }
+		~SharedLock() { ReleaseSRWLockShared(&lock); }
+		SharedLock(const SharedLock &) = delete;
+		SharedLock &operator=(const SharedLock &) = delete;
+
+	private:
+		SRWLOCK &lock;
+	};
+
+	class ExclusiveLock
+	{
+	public:
+		explicit ExclusiveLock(SRWLOCK &lock) : lock(lock) { AcquireSRWLockExclusive(&lock); }
+		~ExclusiveLock() { ReleaseSRWLockExclusive(&lock); }
+		ExclusiveLock(const ExclusiveLock &) = delete;
+		ExclusiveLock &operator=(const ExclusiveLock &) = delete;
+
+	private:
+		SRWLOCK &lock;
+	};
+}
+
 inline vr::HmdQuaternion_t operator*(const vr::HmdQuaternion_t& lhs, const vr::HmdQuaternion_t& rhs) {
 	return {
 		(lhs.w * rhs.w) - (lhs.x * rhs.x) - (lhs.y * rhs.y) - (lhs.z * rhs.z),
@@ -128,6 +155,7 @@ void ServerTrackedDeviceProvider::Cleanup()
 
 void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTransform& newTransform)
 {
+	ExclusiveLock lock(stateLock);
 	auto& tf = transforms[newTransform.openVRID];
 	tf.enabled = newTransform.enabled;
 
@@ -143,6 +171,7 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 
 void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& cmd)
 {
+	ExclusiveLock lock(stateLock);
 	hmdTracker.enabled = cmd.enabled;
 	hmdTracker.native = cmd.native;
 	hmdTracker.slamFallback = cmd.slamFallback;
@@ -171,6 +200,7 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 
 void ServerTrackedDeviceProvider::SetSlamSync(const protocol::SetSlamSync& cmd)
 {
+	ExclusiveLock lock(stateLock);
 	if (cmd.openVRID < vr::k_unMaxTrackedDeviceCount)
 		slamSync[cmd.openVRID] = cmd.enabled;
 }
@@ -185,6 +215,7 @@ void ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
 		return out;
 	};
 
+	ExclusiveLock lock(stateLock);
 	headFilter.rotationFilter.params = toParams(cmd.head);
 	headFilter.translationFilter.params = toParams(cmd.head);
 	drift.rotationFilter.params = toParams(cmd.drift);
@@ -195,13 +226,13 @@ void ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
 	headFilter.enabled = cmd.headEnabled;
 }
 
-void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correctedRotation, const double(&correctedPosition)[3],
+void ServerTrackedDeviceProvider::UpdateDrift(DriftCorrection& drift, double slamScale,
+	const vr::HmdQuaternion_t& correctedRotation, const double(&correctedPosition)[3],
 	const vr::HmdQuaternion_t& rawRotation, const double(&rawPosition)[3])
 {
 	vr::HmdQuaternion_t instRot = quaternionProjectYaw(quaternionNormalize(correctedRotation * quaternionConjugate(rawRotation)));
 	vr::HmdVector3d_t instRotatedRaw = quaternionRotateVector(instRot, rawPosition);
 
-	double slamScale = SlamToCorrectedScale();
 	vr::HmdVector3d_t instTrans = {
 		correctedPosition[0] - instRotatedRaw.v[0] * slamScale,
 		correctedPosition[1] - instRotatedRaw.v[1] * slamScale,
@@ -215,11 +246,10 @@ void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correct
 	drift.valid = true;
 }
 
-void ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose) const
+void ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose, double slamScale,
+	const vr::HmdQuaternion_t& rotation, const vr::HmdVector3d_t& translation)
 {
-	double slamScale = SlamToCorrectedScale();
-
-	pose.qWorldFromDriverRotation = quaternionNormalize(drift.rotation * pose.qWorldFromDriverRotation);
+	pose.qWorldFromDriverRotation = quaternionNormalize(rotation * pose.qWorldFromDriverRotation);
 
 	pose.vecPosition[0] *= slamScale;
 	pose.vecPosition[1] *= slamScale;
@@ -230,16 +260,32 @@ void ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose) const
 		pose.vecWorldFromDriverTranslation[1] * slamScale,
 		pose.vecWorldFromDriverTranslation[2] * slamScale
 	};
-	vr::HmdVector3d_t rotatedTranslation = quaternionRotateVector(drift.rotation, scaledTranslation);
-	pose.vecWorldFromDriverTranslation[0] = rotatedTranslation.v[0] + drift.translation.v[0];
-	pose.vecWorldFromDriverTranslation[1] = rotatedTranslation.v[1] + drift.translation.v[1];
-	pose.vecWorldFromDriverTranslation[2] = rotatedTranslation.v[2] + drift.translation.v[2];
+	vr::HmdVector3d_t rotatedTranslation = quaternionRotateVector(rotation, scaledTranslation);
+	pose.vecWorldFromDriverTranslation[0] = rotatedTranslation.v[0] + translation.v[0];
+	pose.vecWorldFromDriverTranslation[1] = rotatedTranslation.v[1] + translation.v[1];
+	pose.vecWorldFromDriverTranslation[2] = rotatedTranslation.v[2] + translation.v[2];
 }
 
 bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t& pose)
 {
-	auto& tf = transforms[openVRID];
-	if (tf.enabled && !hmdTracker.native)
+	DeviceTransform tf;
+	HmdTracker config;
+	bool sync, driftValid;
+	vr::HmdQuaternion_t driftRotation;
+	vr::HmdVector3d_t driftTranslation;
+	{
+		SharedLock lock(stateLock);
+		tf = transforms[openVRID];
+		config = hmdTracker;
+		sync = slamSync[openVRID];
+		driftValid = drift.valid;
+		driftRotation = drift.rotation;
+		driftTranslation = drift.translation;
+	}
+
+	bool isHmd = config.enabled && openVRID == config.hmdID;
+
+	if (tf.enabled && !config.native)
 	{
 		pose.qWorldFromDriverRotation = tf.rotation * pose.qWorldFromDriverRotation;
 
@@ -253,9 +299,9 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		pose.vecWorldFromDriverTranslation[2] = rotatedTranslation.v[2] + tf.translation.v[2];
 	}
 
-	if (hmdTracker.enabled)
+	if (config.enabled)
 	{
-		if (openVRID == hmdTracker.hmdID)
+		if (isHmd)
 		{
 			bool rawValid = pose.poseIsValid && pose.deviceIsConnected && pose.result == vr::TrackingResult_Running_OK;
 			vr::HmdQuaternion_t rawRotation = { 1, 0, 0, 0 };
@@ -279,117 +325,48 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			vr::PropertyContainerHandle_t container = vr::VRProperties()->TrackedDeviceToPropertyContainer(openVRID);
 
 			vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
-			vr::VRServerDriverHost()->GetRawTrackedDevicePoses((1.0 / vr::VRProperties()->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float)) * hmdTracker.predictionTime, poses, vr::k_unMaxTrackedDeviceCount);
+			vr::VRServerDriverHost()->GetRawTrackedDevicePoses((1.0 / vr::VRProperties()->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float)) * config.predictionTime, poses, vr::k_unMaxTrackedDeviceCount);
 
-			const auto& tp = poses[hmdTracker.trackerID];
-			if (tp.bPoseIsValid)
+			double slamScale;
+			bool trackerValid;
+			vr::HmdQuaternion_t hmdRotation;
+			vr::HmdVector3d_t offset, vel;
+			double trackerVel[3], hmdPosition[3];
+			vr::HmdVector3d_t headAngVel = { 0, 0, 0 };
 			{
-				vr::HmdQuaternion_t trackerQuat = HmdQuaternion_FromMatrix(tp.mDeviceToAbsoluteTracking);
+				ExclusiveLock lock(stateLock);
+				// Settings may have changed while OpenVR was producing the pose snapshot.
+				config = hmdTracker;
+				if (!config.enabled || config.hmdID != openVRID)
+					return true;
 
-				vr::HmdQuaternion_t trackerRefRotation = quaternionNormalize(hmdTracker.calibrationRotation * trackerQuat);
-
-				vr::HmdVector3d_t filteredTrackerPos = trackerFilter.translation.update({
-					tp.mDeviceToAbsoluteTracking.m[0][3],
-					tp.mDeviceToAbsoluteTracking.m[1][3],
-					tp.mDeviceToAbsoluteTracking.m[2][3]
-				});
-				double trackerPos[3] = {
-					filteredTrackerPos.v[0],
-					filteredTrackerPos.v[1],
-					filteredTrackerPos.v[2]
-				};
-
-				vr::HmdVector3d_t trackerRefPosition = quaternionRotateVector(hmdTracker.calibrationRotation, trackerPos);
-
-				trackerRefPosition.v[0] += hmdTracker.calibrationTranslation.v[0];
-				trackerRefPosition.v[1] += hmdTracker.calibrationTranslation.v[1];
-				trackerRefPosition.v[2] += hmdTracker.calibrationTranslation.v[2];
-
-				vr::HmdQuaternion_t hmdRotation = quaternionNormalize(hmdTracker.native ? trackerQuat * hmdTracker.offsetRotation : trackerRefRotation * hmdTracker.offsetRotation);
-				vr::HmdVector3d_t offset = quaternionRotateVector(hmdTracker.native ? trackerQuat : trackerRefRotation, hmdTracker.offsetTranslation.v);
-
-				pose.qWorldFromDriverRotation = { 1, 0, 0, 0 };
-				pose.vecWorldFromDriverTranslation[0] = 0;
-				pose.vecWorldFromDriverTranslation[1] = 0;
-				pose.vecWorldFromDriverTranslation[2] = 0;
-
-				pose.qDriverFromHeadRotation = { 1, 0, 0, 0 };
-				pose.vecDriverFromHeadTranslation[0] = 0;
-				pose.vecDriverFromHeadTranslation[1] = 0;
-				pose.vecDriverFromHeadTranslation[2] = 0;
-
-				if (hmdTracker.native) {
-					pose.qRotation = hmdRotation;
-					pose.vecPosition[0] = trackerPos[0] + offset.v[0];
-					pose.vecPosition[1] = trackerPos[1] + offset.v[1];
-					pose.vecPosition[2] = trackerPos[2] + offset.v[2];
-				}
-				else {
-					pose.qRotation = hmdRotation;
-					pose.vecPosition[0] = trackerRefPosition.v[0] + offset.v[0];
-					pose.vecPosition[1] = trackerRefPosition.v[1] + offset.v[1];
-					pose.vecPosition[2] = trackerRefPosition.v[2] + offset.v[2];
-				}
-
-				if (headFilter.enabled)
+				slamScale = SlamToCorrectedScale(config);
+				const auto* tp = config.trackerID < vr::k_unMaxTrackedDeviceCount ? &poses[config.trackerID] : nullptr;
+				trackerValid = tp && tp->bPoseIsValid;
+				if (trackerValid)
 				{
-					double dt = FilterStep(headFilter.lastUpdate, headFilter.valid);
-					headFilter.valid = true;
+					vr::HmdQuaternion_t trackerQuat = HmdQuaternion_FromMatrix(tp->mDeviceToAbsoluteTracking);
 
-					pose.qRotation = headFilter.rotationFilter.filter(pose.qRotation, dt);
+					vr::HmdQuaternion_t trackerRefRotation = quaternionNormalize(config.calibrationRotation * trackerQuat);
 
-					vr::HmdVector3d_t headPos = headFilter.translationFilter.filter(
-						{ pose.vecPosition[0], pose.vecPosition[1], pose.vecPosition[2] }, dt);
-					pose.vecPosition[0] = headPos.v[0];
-					pose.vecPosition[1] = headPos.v[1];
-					pose.vecPosition[2] = headPos.v[2];
-				}
+					hmdRotation = quaternionNormalize(config.native ? trackerQuat * config.offsetRotation : trackerRefRotation * config.offsetRotation);
+					offset = quaternionRotateVector(config.native ? trackerQuat : trackerRefRotation, config.offsetTranslation.v);
 
-				double trackerVel[3] = {
-					tp.vVelocity.v[0],
-					tp.vVelocity.v[1],
-					tp.vVelocity.v[2]
-				};
+					trackerVel[0] = tp->vVelocity.v[0];
+					trackerVel[1] = tp->vVelocity.v[1];
+					trackerVel[2] = tp->vVelocity.v[2];
 
-				double trackerAngVel[3] = {
-					tp.vAngularVelocity.v[0],
-					tp.vAngularVelocity.v[1],
-					tp.vAngularVelocity.v[2]
-				};
+					double trackerAngVel[3] = {
+						tp->vAngularVelocity.v[0],
+						tp->vAngularVelocity.v[1],
+						tp->vAngularVelocity.v[2]
+					};
 
-				vr::HmdVector3d_t vel = quaternionRotateVector(hmdTracker.calibrationRotation, trackerVel);
-				vel.v[0] *= hmdTracker.calibrationScale;
-				vel.v[1] *= hmdTracker.calibrationScale;
-				vel.v[2] *= hmdTracker.calibrationScale;
+					vel = quaternionRotateVector(config.calibrationRotation, trackerVel);
+					vel.v[0] *= config.calibrationScale;
+					vel.v[1] *= config.calibrationScale;
+					vel.v[2] *= config.calibrationScale;
 
-				double dtAng = FilterStep(headVel.lastUpdate, headVel.valid);
-				vr::HmdVector3d_t headAngVel = { 0, 0, 0 };
-				if (headVel.valid)
-					headAngVel = headVel.filter.filter(quaternionAngularVelocity(pose.qRotation, headVel.prevRotation, dtAng), dtAng);
-				headVel.prevRotation = pose.qRotation;
-				headVel.valid = true;
-
-				vr::HmdVector3d_t tangential = {
-					headAngVel.v[1] * offset.v[2] - headAngVel.v[2] * offset.v[1],
-					headAngVel.v[2] * offset.v[0] - headAngVel.v[0] * offset.v[2],
-					headAngVel.v[0] * offset.v[1] - headAngVel.v[1] * offset.v[0]
-				};
-
-				for (int i = 0; i < 3; i++)
-				{
-					double baseVel = hmdTracker.native ? trackerVel[i] : vel.v[i];
-					pose.vecVelocity[i] = baseVel + tangential.v[i];
-					pose.vecAngularVelocity[i] = hmdTracker.enableAngularVelocity ? headAngVel.v[i] : 0.0;
-				}
-
-				pose.poseIsValid = true;
-				pose.deviceIsConnected = true;
-				pose.result = vr::TrackingResult_Running_OK;
-				pose.shouldApplyHeadModel = false;
-				pose.poseTimeOffset = 0;
-
-				if (rawValid)
-				{
 					double linSpeed = sqrt(
 						trackerVel[0] * trackerVel[0] +
 						trackerVel[1] * trackerVel[1] +
@@ -400,28 +377,121 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 						trackerAngVel[1] * trackerAngVel[1] +
 						trackerAngVel[2] * trackerAngVel[2]);
 
-					const double maxLinSpeed = 2.75;
-					const double maxAngSpeed = 3.5;
+					vr::HmdVector3d_t filteredTrackerPos = trackerFilter.translation.update({
+						tp->mDeviceToAbsoluteTracking.m[0][3],
+						tp->mDeviceToAbsoluteTracking.m[1][3],
+						tp->mDeviceToAbsoluteTracking.m[2][3]
+					});
+					double trackerPos[3] = {
+						filteredTrackerPos.v[0],
+						filteredTrackerPos.v[1],
+						filteredTrackerPos.v[2]
+					};
 
-					if (!drift.valid || (linSpeed < maxLinSpeed && angSpeed < maxAngSpeed))
-						UpdateDrift(pose.qRotation, pose.vecPosition, rawRotation, rawPosition);
+					vr::HmdVector3d_t trackerRefPosition = quaternionRotateVector(config.calibrationRotation, trackerPos);
+
+					trackerRefPosition.v[0] += config.calibrationTranslation.v[0];
+					trackerRefPosition.v[1] += config.calibrationTranslation.v[1];
+					trackerRefPosition.v[2] += config.calibrationTranslation.v[2];
+
+					if (config.native) {
+						hmdPosition[0] = trackerPos[0] + offset.v[0];
+						hmdPosition[1] = trackerPos[1] + offset.v[1];
+						hmdPosition[2] = trackerPos[2] + offset.v[2];
+					}
+					else {
+						hmdPosition[0] = trackerRefPosition.v[0] + offset.v[0];
+						hmdPosition[1] = trackerRefPosition.v[1] + offset.v[1];
+						hmdPosition[2] = trackerRefPosition.v[2] + offset.v[2];
+					}
+
+					if (headFilter.enabled)
+					{
+						double dt = FilterStep(headFilter.lastUpdate, headFilter.valid);
+						headFilter.valid = true;
+
+						hmdRotation = headFilter.rotationFilter.filter(hmdRotation, dt);
+
+						vr::HmdVector3d_t headPos = headFilter.translationFilter.filter(
+							{ hmdPosition[0], hmdPosition[1], hmdPosition[2] }, dt);
+						hmdPosition[0] = headPos.v[0];
+						hmdPosition[1] = headPos.v[1];
+						hmdPosition[2] = headPos.v[2];
+					}
+
+					double dtAng = FilterStep(headVel.lastUpdate, headVel.valid);
+					if (headVel.valid)
+						headAngVel = headVel.filter.filter(quaternionAngularVelocity(hmdRotation, headVel.prevRotation, dtAng), dtAng);
+					headVel.prevRotation = hmdRotation;
+					headVel.valid = true;
+
+					if (rawValid)
+					{
+						const double maxLinSpeed = 2.75;
+						const double maxAngSpeed = 3.5;
+
+						if (!drift.valid || (linSpeed < maxLinSpeed && angSpeed < maxAngSpeed))
+							UpdateDrift(drift, slamScale, hmdRotation, hmdPosition, rawRotation, rawPosition);
+					}
+				}
+				else {
+					headVel.reset();
+					trackerFilter.reset();
+					driftValid = drift.valid;
+					driftRotation = drift.rotation;
+					driftTranslation = drift.translation;
 				}
 			}
+
+			if (trackerValid)
+			{
+				pose.qWorldFromDriverRotation = { 1, 0, 0, 0 };
+				pose.vecWorldFromDriverTranslation[0] = 0;
+				pose.vecWorldFromDriverTranslation[1] = 0;
+				pose.vecWorldFromDriverTranslation[2] = 0;
+
+				pose.qDriverFromHeadRotation = { 1, 0, 0, 0 };
+				pose.vecDriverFromHeadTranslation[0] = 0;
+				pose.vecDriverFromHeadTranslation[1] = 0;
+				pose.vecDriverFromHeadTranslation[2] = 0;
+
+				pose.qRotation = hmdRotation;
+				pose.vecPosition[0] = hmdPosition[0];
+				pose.vecPosition[1] = hmdPosition[1];
+				pose.vecPosition[2] = hmdPosition[2];
+
+				vr::HmdVector3d_t tangential = {
+					headAngVel.v[1] * offset.v[2] - headAngVel.v[2] * offset.v[1],
+					headAngVel.v[2] * offset.v[0] - headAngVel.v[0] * offset.v[2],
+					headAngVel.v[0] * offset.v[1] - headAngVel.v[1] * offset.v[0]
+				};
+
+				for (int i = 0; i < 3; i++)
+				{
+					double baseVel = config.native ? trackerVel[i] : vel.v[i];
+					pose.vecVelocity[i] = baseVel + tangential.v[i];
+					pose.vecAngularVelocity[i] = config.enableAngularVelocity ? headAngVel.v[i] : 0.0;
+				}
+
+				pose.poseIsValid = true;
+				pose.deviceIsConnected = true;
+				pose.result = vr::TrackingResult_Running_OK;
+				pose.shouldApplyHeadModel = false;
+				pose.poseTimeOffset = 0;
+			}
 			else {
-				headVel.reset();
-				trackerFilter.reset();
-				if (!hmdTracker.slamFallback) {
-					if (hmdTracker.native) {
+				if (!config.slamFallback) {
+					if (config.native) {
 						pose.qWorldFromDriverRotation = { 1, 0, 0, 0 };
 						pose.vecWorldFromDriverTranslation[0] = 0;
 						pose.vecWorldFromDriverTranslation[1] = 0;
 						pose.vecWorldFromDriverTranslation[2] = 0;
 					}
 					else {
-						pose.qWorldFromDriverRotation = hmdTracker.calibrationRotation;
-						pose.vecWorldFromDriverTranslation[0] = hmdTracker.calibrationTranslation.v[0];
-						pose.vecWorldFromDriverTranslation[1] = hmdTracker.calibrationTranslation.v[1];
-						pose.vecWorldFromDriverTranslation[2] = hmdTracker.calibrationTranslation.v[2];
+						pose.qWorldFromDriverRotation = config.calibrationRotation;
+						pose.vecWorldFromDriverTranslation[0] = config.calibrationTranslation.v[0];
+						pose.vecWorldFromDriverTranslation[1] = config.calibrationTranslation.v[1];
+						pose.vecWorldFromDriverTranslation[2] = config.calibrationTranslation.v[2];
 					}
 
 					pose.qDriverFromHeadRotation = { 1, 0, 0, 0 };
@@ -446,14 +516,14 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					pose.shouldApplyHeadModel = false;
 					pose.poseTimeOffset = 0;
 				}
-				else if (drift.valid) {
-					ApplyDrift(pose);
+				else if (driftValid) {
+					ApplyDrift(pose, slamScale, driftRotation, driftTranslation);
 				}
 			}
 		}
-		else if (slamSync[openVRID] && drift.valid)
+		else if (sync && driftValid)
 		{
-			ApplyDrift(pose);
+			ApplyDrift(pose, SlamToCorrectedScale(config), driftRotation, driftTranslation);
 		}
 	}
 
