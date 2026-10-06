@@ -33,6 +33,24 @@ void UserInterface::Render(bool runningInOverlay)
 	auto &io = ImGui::GetIO();
 	ImGuiStyle &style = ImGui::GetStyle();
 
+	auto statusText = [](const ImColor &color, const std::string &text) {
+		ImGui::PushStyleColor(ImGuiCol_Text, color.Value);
+		ImGui::TextWrapped("%s", text.c_str());
+		ImGui::PopStyleColor();
+	};
+
+	auto progressBar = [&style](int progress, int target) {
+		float fraction = target > 0 ? std::clamp((float)progress / (float)target, 0.0f, 1.0f) : 0.0f;
+		ImGui::PushStyleColor(ImGuiCol_FrameBg, (ImVec4)ImColor(0, 0, 0));
+		ImGui::ProgressBar(fraction, ImVec2(-1.0f, 0.0f), "");
+		ImGui::PopStyleColor();
+		if (target > 0)
+		{
+			ImGui::SetCursorPosY(ImGui::GetCursorPosY() - ImGui::GetFontSize() - style.FramePadding.y * 2);
+			ImGui::Text(" %d%%", (int)(fraction * 100));
+		}
+	};
+
 	ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
 	ImGui::SetNextWindowSize(io.DisplaySize);
 
@@ -113,19 +131,87 @@ void UserInterface::Render(bool runningInOverlay)
 					tracker = &device;
 			}
 
+			const ImColor gray(0.5f, 0.5f, 0.5f), green(0.2f, 0.7f, 0.2f), orange(0.9f, 0.6f, 0.1f);
+			auto driverLink = GetDriverLinkStatus();
+			auto headTracker = GetHeadTrackerState();
+			auto acquire = GetAcquireStatus();
+
+			if (!driverLink.connected)
+			{
+				std::string error = driverLink.lastError;
+				error.erase(error.find_last_not_of(" \t\r\n") + 1);
+				std::string text = "Waiting for the SpaceOverride driver.";
+				if (!error.empty())
+					text += " " + error;
+				statusText(orange, text);
+			}
+
 			if (hmd)
 				ImGui::Text("HMD: %s (%s)", hmd->serial.c_str(), hmd->trackingSystem.c_str());
 			else
 				ImGui::TextColored(ImColor(0.8f, 0.2f, 0.2f), "No HMD detected");
 
-			if (!CalCtx.validProfile)
-				ImGui::TextColored(ImColor(0.5f, 0.5f, 0.5f), "No calibration. Press Calibrate, then move your head to identify the headset tracker.");
-			else if (!tracker)
-				ImGui::TextColored(ImColor(0.8f, 0.2f, 0.2f), "Headset tracker (%s) not connected, override disabled", CalCtx.trackerSerial.c_str());
-			else if (!CalCtx.enabled)
-				ImGui::TextColored(ImColor(0.8f, 0.2f, 0.2f), "Override disabled (HMD tracking system changed?)");
+			if (headTracker != HeadTrackerState::Unbound)
+			{
+				const std::string &serial = CalCtx.trackerSerial;
+				if (CalCtx.state == CalibrationState::WaitForTracker || CalCtx.state == CalibrationState::Sampling)
+					statusText(green, "Calibrating head tracker " + serial + ".");
+				else if (!CalCtx.validRelativeOffset)
+					statusText(orange, "Head tracker " + serial + " needs calibration. Press Calibrate.");
+				else if (headTracker == HeadTrackerState::Active)
+				{
+					std::string activeSerial = tracker ? tracker->serial : serial;
+					std::string activeSystem = tracker ? tracker->trackingSystem : CalCtx.targetTrackingSystem;
+					statusText(green, "Override active: HMD driven by " + activeSerial + (activeSystem.empty() ? "" : " (" + activeSystem + ")"));
+				}
+				else if (!driverLink.connected)
+					statusText(gray, "Head tracker " + serial + " is bound. The override starts when the driver connects.");
+				else if (CalCtx.fallbackToSlam)
+					statusText(orange, "Head tracker " + serial + " is not tracking. The headset uses its own tracking until it is back.");
+				else
+					statusText(orange, "Head tracker " + serial + " is not tracking. Headset tracking is paused until it is back.");
+			}
+			else if (acquire.state == AcquireState::Off)
+				statusText(gray, "No head tracker. Press Calibrate, then move your head to identify the headset tracker.");
 			else
-				ImGui::TextColored(ImColor(0.2f, 0.7f, 0.2f), "Override active: HMD driven by %s (%s)", tracker->serial.c_str(), tracker->trackingSystem.c_str());
+			{
+				switch (acquire.state)
+				{
+				case AcquireState::NeedHands:
+					statusText(gray, "Looking for your head tracker. Turn on hand tracking and hold your lighthouse controllers.");
+					break;
+				case AcquireState::Syncing:
+					// handPairs counts synced pairs, so it can be 0 here.
+					if (acquire.handPairs > 0)
+						statusText(gray, "Hands found (" + std::to_string(acquire.handPairs) + "). Move your hands around a little.");
+					else
+						statusText(gray, "Hands found. Move your hands around a little.");
+					break;
+				case AcquireState::Searching:
+					statusText(gray, "Hands synced. Looking for the tracker on your head. Look around naturally.");
+					break;
+				case AcquireState::Calibrating:
+					statusText(green, "Found head tracker " + acquire.trackerSerial + ". Look around naturally to finish.");
+					progressBar(acquire.progress, acquire.target);
+					break;
+				case AcquireState::ProfileUnreadable:
+					statusText(orange, "Saved calibration could not be read yet. Retrying.");
+					break;
+				default:
+					break;
+				}
+			}
+
+			bool autoAcquire = CalCtx.autoAcquire;
+			if (ImGui::Checkbox("Find head tracker automatically", &autoAcquire))
+				SetAutoAcquire(autoAcquire);
+			if (ImGui::BeginItemTooltip())
+			{
+				ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
+				ImGui::TextUnformatted("Uses hand tracking and the lighthouse controllers in your hands to find the tracker on your headset, then calibrates it without a button. Turn this off to stop it.");
+				ImGui::PopTextWrapPos();
+				ImGui::EndTooltip();
+			}
 
 			ImGui::Text("");
 
@@ -152,8 +238,7 @@ void UserInterface::Render(bool runningInOverlay)
 					ImGui::SameLine();
 					if (ImGui::Button("Remove Calibration", ImVec2(buttonWidth, ImGui::GetTextLineHeight() * 2)))
 					{
-						CalCtx.Clear();
-						SaveProfile(CalCtx);
+						RemoveCalibration();
 					}
 				}
 
@@ -231,9 +316,10 @@ void UserInterface::Render(bool runningInOverlay)
 					CalCtx.state = CalibrationState::None;
 				}
 			}
-			else
+			else if (acquire.state != AcquireState::Calibrating)
 			{
-				ImGui::Button("Calibration in progress...", ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetTextLineHeight() * 2));
+				if (ImGui::Button("Calibration in progress...", ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetTextLineHeight() * 2)))
+					ImGui::OpenPopup("Calibration Progress");
 			}
 
 			float footerHeight = ImGui::GetTextLineHeightWithSpacing() * (runningInOverlay ? 2.0f : 1.0f);
@@ -250,31 +336,40 @@ void UserInterface::Render(bool runningInOverlay)
 			ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x - 40.0f, io.DisplaySize.y - 40.0f));
 			if (ImGui::BeginPopupModal("Calibration Progress", nullptr, modalWindowFlags))
 			{
-				ImGui::PushStyleColor(ImGuiCol_FrameBg, (ImVec4)ImColor(0, 0, 0));
+				// Calibrate runs also write their status into the log; show it once.
+				bool statusLogged = std::any_of(CalCtx.messages.begin(), CalCtx.messages.end(), [](const CalibrationContext::Message &message) {
+					return message.type == CalibrationContext::Message::String && message.str == CalCtx.statusLine;
+				});
+				if (!CalCtx.statusLine.empty() && !statusLogged)
+					ImGui::TextWrapped("%s", CalCtx.statusLine.c_str());
+
 				for (auto &message : CalCtx.messages)
 				{
 					switch (message.type)
 					{
 					case CalibrationContext::Message::String:
-						ImGui::TextWrapped(message.str.c_str());
+						ImGui::TextWrapped("%s", message.str.c_str());
 						break;
 					case CalibrationContext::Message::Progress:
-						float fraction = (float)message.progress / (float)message.target;
 						ImGui::Text("");
-						ImGui::ProgressBar(fraction, ImVec2(-1.0f, 0.0f), "");
-						ImGui::SetCursorPosY(ImGui::GetCursorPosY() - ImGui::GetFontSize() - style.FramePadding.y * 2);
-						ImGui::Text(" %d%%", (int)(fraction * 100));
+						progressBar(message.progress, message.target);
 						break;
 					}
 				}
-				ImGui::PopStyleColor();
 
-				if (CalCtx.state == CalibrationState::None)
+				ImGui::Text("");
+				if (CalCtx.state != CalibrationState::None && CalCtx.state != CalibrationState::Editing)
 				{
-					ImGui::Text("");
-					if (ImGui::Button("Close", ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetTextLineHeight() * 2)))
-						ImGui::CloseCurrentPopup();
+					if (ImGui::Button("Cancel", ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetTextLineHeight() * 2)))
+					{
+						CancelCalibration();
+						// Keep the popup until the run has actually stopped.
+						if (CalCtx.state == CalibrationState::None)
+							ImGui::CloseCurrentPopup();
+					}
 				}
+				else if (ImGui::Button("Close", ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetTextLineHeight() * 2)))
+					ImGui::CloseCurrentPopup();
 
 				ImGui::EndPopup();
 			}
