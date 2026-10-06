@@ -112,17 +112,19 @@ static auto CreateNotificationOverlay() -> void
     vr::VROverlay()->SetOverlayTransformTrackedDeviceRelative(g_notifyOverlayHandle, vr::k_unTrackedDeviceIndex_Hmd, &m);
 }
 
-static auto ShowNotification(const char* text) -> vr::VRNotificationId
+static auto ShowNotification(const char* text, vr::EVRNotificationType type) -> vr::VRNotificationId
 {
     if (g_notifyOverlayHandle == vr::k_ulOverlayHandleInvalid)
         return 0;
 
     vr::VRNotificationId id = 0;
-    vr::VRNotifications()->CreateNotification(
-        g_notifyOverlayHandle, 0, vr::EVRNotificationType_Persistent,
+    auto error = vr::VRNotifications()->CreateNotification(
+        g_notifyOverlayHandle, 0, type,
         text, vr::EVRNotificationStyle_None, nullptr, &id
     );
 
+	if (error != vr::VRNotificationError_OK)
+		fprintf(stderr, "Creating calibration notification: %d\n", error);
     return id;
 }
 
@@ -174,6 +176,11 @@ int main(int argc, char** argv)
         g_overlay->EnableFlag(vr::VROverlayFlags_EnableClickStabilization);
 
         CreateNotificationOverlay();
+		SetCalibrationNotificationHandler(ShowNotification, [](vr::VRNotificationId id) {
+			auto error = vr::VRNotifications()->RemoveNotification(id);
+			if (error != vr::VRNotificationError_OK)
+				fprintf(stderr, "Removing calibration notification: %d\n", error);
+		});
     }
     catch (std::exception& ex) {
 #ifdef _WIN32
@@ -349,7 +356,7 @@ int main(int argc, char** argv)
         g_last_frame_time = now;
     }
 
-    SaveProfile(CalCtx);
+	SaveProfile(CalCtx, true);
 
     VkResult vk_result = vkDeviceWaitIdle(g_vulkanRenderer->Device());
     VK_VALIDATE_RESULT(vk_result);
