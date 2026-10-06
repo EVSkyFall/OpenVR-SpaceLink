@@ -10,6 +10,35 @@ This puts the headset and all your other lighthouse devices on the same tracking
 > [!TIP]
 > OpenVR-SpaceOverride **is not** OpenVR-SpaceCalibrator nor a *fork*, it uses a completely novel technique starting from v9. Older vesions had code used from space cal to workaround a technical limitation which has been resolved.
 
+## What this fork changes
+
+### The head tracker stays bound
+
+Once a tracker has been calibrated as the head tracker, it stays bound until you press **Remove Calibration**. Losing tracking, turning the tracker off, restarting SteamVR or the overlay, and a failed or cancelled calibration all keep the binding.
+
+- While the bound tracker is not tracking, the headset falls back to its own tracking with the last correction (or stops, if "Fallback to SLAM" is off) and picks the tracker up again as soon as it tracks.
+- **Calibrate** with a bound tracker recalibrates that same tracker. It never switches to another one, and it waits if the tracker is not tracking yet.
+- Calibration no longer aborts on its own. Tracking interruptions pause it, and low quality keeps collecting. Use **Cancel** in the progress window to stop it; the previous calibration stays in place.
+
+### Finding the head tracker automatically
+
+With **Find head tracker automatically** on (the default) and no tracker bound, the overlay looks for the head tracker by itself:
+
+1. Turn on hand tracking in your streaming app (for example Virtual Desktop) and hold your lighthouse controllers.
+2. Move your hands around a little. The overlay pairs each tracked hand with the lighthouse controller it holds and lines up the two tracking spaces roughly.
+3. Look around naturally. The tracker that moves with your head and sits on it is picked, and calibration starts on its own. SteamVR shows a notification when the tracker is found and when it is ready.
+
+Remove Calibration with this setting on starts the search again. Turn the setting off to stop it.
+
+### Known limitations
+
+- Automatic search needs hand tracking and lighthouse controllers held in the same hands. Without them, use Calibrate.
+- A tracker is only accepted when it moves rigidly with the headset in more than one direction (look up, down and around), sits close to it, and is not clearly below it. A chest tracker is not picked even if your neck stays still.
+- The search waits until the hand pairs also pin down height, which needs some wrist rotation besides turning.
+- Very old profiles without a stored tracker serial that also use a device scale different from 1 are mapped back to raw poses only approximately (about a centimeter or two) during the automatic search.
+
+Problems with these changes belong to this fork, not to the original author.
+
 ## Requirements
 
 - Lighthouse system (or other equivalent)
