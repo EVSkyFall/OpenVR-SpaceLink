@@ -4,6 +4,8 @@
 
 #include <string>
 #include <stdexcept>
+#include <algorithm>
+#include <cstring>
 
 static std::string LastErrorString(DWORD lastError)
 {
@@ -13,7 +15,7 @@ static std::string LastErrorString(DWORD lastError)
 		NULL, lastError, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&buffer, 0, NULL
 	);
 
-	std::string message(buffer, size);
+	std::string message = buffer ? std::string(buffer, size) : std::to_string(lastError);
 	LocalFree(buffer);
 	return message;
 }
@@ -24,31 +26,32 @@ IPCClient::~IPCClient()
 		CloseHandle(pipe);
 }
 
-void IPCClient::Connect()
+void IPCClient::Disconnect(const std::string &error, double time)
 {
-	const int maxAttempts = 3;
-	DWORD delayMs = 2000;
+	if (pipe != INVALID_HANDLE_VALUE)
+		CloseHandle(pipe);
+	pipe = INVALID_HANDLE_VALUE;
+	lastError = error;
+	nextAttempt = time + retryDelay;
+	retryDelay = (std::min)(retryDelay * 2, 30.0);
+	fprintf(stderr, "IPC: %s\n", error.c_str());
+}
 
-	for (int attempt = 1; attempt <= maxAttempts; ++attempt)
+bool IPCClient::Connect(double time)
+{
+	if (Connected() || time < nextAttempt)
+		return false;
+	try
 	{
-		try
-		{
-			ConnectInternal();
-			return;
-		}
-		catch (const std::runtime_error& e)
-		{
-			if (pipe && pipe != INVALID_HANDLE_VALUE)
-				CloseHandle(pipe);
-			pipe = INVALID_HANDLE_VALUE;
-
-			if (attempt >= 3)
-				throw;
-
-			fprintf(stderr, "IPC connect failed (attempt %d/3), retrying in %lums: %s\n", attempt, delayMs, e.what());
-			Sleep(delayMs);
-			delayMs *= 2;
-		}
+		ConnectInternal();
+		retryDelay = 1;
+		lastError.clear();
+		return true;
+	}
+	catch (const std::exception &error)
+	{
+		Disconnect(error.what(), time);
+		return false;
 	}
 }
 
@@ -94,11 +97,10 @@ protocol::Response IPCClient::Receive()
 void IPCClient::ConnectInternal()
 {
 	LPCTSTR pipeName = TEXT(OPENVR_SPACECALIBRATOR_PIPE_NAME);
-	WaitNamedPipe(pipeName, 1000);
 	pipe = CreateFile(pipeName, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, 0, 0);
 	if (pipe == INVALID_HANDLE_VALUE)
 	{
-		throw std::runtime_error("Space Override driver unavailable. Make sure SteamVR is running, and the Space Calibrator addon is enabled in SteamVR settings.");
+		throw std::runtime_error("Driver is unavailable. " + LastErrorString(GetLastError()));
 	}
 
 	DWORD mode = PIPE_READMODE_MESSAGE;
@@ -107,15 +109,18 @@ void IPCClient::ConnectInternal()
 		throw std::runtime_error("Couldn't set pipe mode. Error: " + LastErrorString(GetLastError()));
 	}
 
-	Send(protocol::Request(protocol::RequestHandshake));
+	protocol::Request request;
+	std::memset(&request, 0, sizeof request);
+	request.type = protocol::RequestHandshake;
+	Send(request);
 	auto response = Receive();
 
 	if (response.type != protocol::ResponseHandshake || response.protocol.version != protocol::Version)
 	{
 		throw std::runtime_error(
-			"Incorrect driver version installed, try reinstalling OpenVR-SpaceOverride. (Client: " +
+			"Driver protocol differs. Client: " +
 			std::to_string(protocol::Version) + ", Driver: " +
-			std::to_string(response.protocol.version) + ")"
+			std::to_string(response.protocol.version) + "."
 		);
 	}
 }

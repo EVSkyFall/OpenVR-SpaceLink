@@ -5,4 +5,8 @@
 #include "Calibration.h"
 
 void LoadProfile(CalibrationContext &ctx);
-void SaveProfile(CalibrationContext &ctx);
+void SaveProfile(CalibrationContext &ctx, bool exiting = false);
+void RetryConfiguration(CalibrationContext &ctx);
+void SaveAppSettings(const CalibrationContext &ctx);
+bool ProfileReadSucceeded();
+bool SettingsReadSucceeded();

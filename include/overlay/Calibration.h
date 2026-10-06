@@ -15,6 +15,7 @@ enum class CalibrationState
 	None,
 	Begin,
 	Detect,
+	WaitForTracker,
 	Sampling,
 	Editing,
 };
@@ -22,10 +23,10 @@ enum class CalibrationState
 struct CalibrationContext
 {
 	CalibrationState state = CalibrationState::None;
-	uint32_t targetID;
+	uint32_t targetID = vr::k_unTrackedDeviceIndexInvalid;
 
-	Eigen::Vector3d calibratedRotation;
-	Eigen::Vector3d calibratedTranslation;
+	Eigen::Vector3d calibratedRotation = Eigen::Vector3d::Zero();
+	Eigen::Vector3d calibratedTranslation = Eigen::Vector3d::Zero();
 	double calibratedScale = 1.0;
 	double targetModelScale = 1.0;
 	double hmdScale = 1.0;
@@ -41,6 +42,8 @@ struct CalibrationContext
 
 	bool enabled = false;
 	bool validProfile = false;
+	bool autoAcquire = true;
+	std::string statusLine;
 	double timeLastTick = 0, timeLastScan = 0;
 	double wantedUpdateInterval = 1.0;
 
@@ -64,41 +67,20 @@ struct CalibrationContext
 	};
 	Speed calibrationSpeed = FAST;
 
-	vr::TrackedDevicePose_t devicePoses[vr::k_unMaxTrackedDeviceCount];
+	vr::TrackedDevicePose_t devicePoses[vr::k_unMaxTrackedDeviceCount]{};
 
 	struct Chaperone
 	{
 		bool valid = false;
 		bool autoApply = true;
 		std::vector<vr::HmdQuad_t> geometry;
-		vr::HmdMatrix34_t standingCenter;
-		vr::HmdVector2_t playSpaceSize;
+		vr::HmdMatrix34_t standingCenter{};
+		vr::HmdVector2_t playSpaceSize{};
 	} chaperone;
 
-	void Clear()
-	{
-		chaperone.geometry.clear();
-		chaperone.standingCenter = vr::HmdMatrix34_t();
-		chaperone.playSpaceSize = vr::HmdVector2_t();
-		chaperone.valid = false;
+	void Clear();
 
-		calibratedRotation = Eigen::Vector3d();
-		calibratedTranslation = Eigen::Vector3d();
-		calibratedScale = 1.0;
-		targetModelScale = 1.0;
-		hmdScale = 1.0;
-		relativeRotation = { 1, 0, 0, 0 };
-		relativeTranslation = { 0, 0, 0 };
-		validRelativeOffset = false;
-		targetTrackingSystem = "";
-		hmdSerial = "";
-		trackerSerial = "";
-		enabled = false;
-		validProfile = false;
-		continuousSync = true;
-	}
-
-	size_t SampleCount()
+	size_t SampleCount() const
 	{
 		switch (calibrationSpeed)
 		{
@@ -155,3 +137,14 @@ void StartCalibration();
 void LoadChaperoneBounds();
 void ApplyChaperoneBounds();
 void SendOneEuroParams();
+enum class HeadTrackerState { Unbound, Waiting, Active };
+enum class AcquireState { Off, Bound, ProfileUnreadable, NeedHands, Syncing, Searching, Calibrating, Paused };
+struct AcquireStatus { AcquireState state = AcquireState::Off; int handPairs = 0; std::string trackerSerial; int progress = 0, target = 0; };
+struct DriverLinkStatus { bool connected = false; std::string lastError; };
+HeadTrackerState GetHeadTrackerState();
+AcquireStatus GetAcquireStatus();
+DriverLinkStatus GetDriverLinkStatus();
+void CancelCalibration();
+void SetAutoAcquire(bool enabled);
+void RemoveCalibration();
+void SetCalibrationNotificationHandler(vr::VRNotificationId (*show)(const char *, vr::EVRNotificationType), void (*remove)(vr::VRNotificationId));

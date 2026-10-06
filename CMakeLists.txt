@@ -97,3 +97,34 @@ target_link_libraries(driver_spaceoverride PRIVATE
 
 set_property(TARGET driver_spaceoverride PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 set_target_properties(driver_spaceoverride PROPERTIES PREFIX "")
+set(SPACE_OVERRIDE_LOGIC_SOURCES
+	"src/overlay/AcquisitionMath.cpp"
+	"src/overlay/SamplerPolicy.cpp"
+	"src/overlay/CalibrationMath.cpp"
+	"src/overlay/AttemptLifecycle.cpp"
+	"src/overlay/DesiredState.cpp"
+	"src/overlay/ProfileCodec.cpp"
+	"src/overlay/AutoAcquisition.cpp"
+	"src/overlay/ManualDetection.cpp"
+)
+target_sources(OpenVR-SpaceOverride PRIVATE ${SPACE_OVERRIDE_LOGIC_SOURCES})
+
+add_executable(SpaceOverrideTests EXCLUDE_FROM_ALL
+	"tests/SpaceOverrideTests.cpp"
+	${SPACE_OVERRIDE_LOGIC_SOURCES}
+)
+target_include_directories(SpaceOverrideTests PRIVATE
+	"${CMAKE_SOURCE_DIR}/include/overlay"
+	"${CMAKE_SOURCE_DIR}/include/shared"
+	"${OpenVR_INCLUDE_DIR}"
+)
+target_link_libraries(SpaceOverrideTests PRIVATE Eigen PicoJSON)
+target_compile_definitions(SpaceOverrideTests PRIVATE
+	_HAS_DEPRECATED_NEGATORS=1
+	_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS
+)
+if (MSVC)
+	target_compile_options(SpaceOverrideTests PRIVATE /bigobj)
+endif()
+enable_testing()
+add_test(NAME SpaceOverrideTests COMMAND SpaceOverrideTests)
