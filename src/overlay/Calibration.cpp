@@ -313,10 +313,7 @@ static bool AutoEligible()
 static void TickAcquisition(double time, const ObservationSpace &observationSpace)
 {
 	if (AutoEligible())
-	{
-		auto poses = observationSpace.RawPoses(CalCtx.devicePoses);
-		Acquisition.Observe(time, poses.data());
-	}
+		Acquisition.ObserveConfigured(time, CalCtx.devicePoses, observationSpace);
 	if (AcquisitionWork.valid() && AcquisitionWork.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
 	{
 		try
@@ -377,6 +374,7 @@ static void TickManualDetection(double time)
 		Status("Head tracker is not tracking. Paused until it is back.");
 		break;
 	case ManualDetection::Event::Selected:
+		Attempt->serial = result.serial;
 		ChooseTracker(result.id);
 		break;
 	case ManualDetection::Event::Collecting:
