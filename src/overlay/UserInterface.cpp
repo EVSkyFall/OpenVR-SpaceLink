@@ -166,10 +166,11 @@ void UserInterface::Render(bool runningInOverlay)
 				}
 				else if (!driverLink.connected)
 					statusText(gray, "Head tracker " + serial + " is bound. The override starts when the driver connects.");
-				else if (CalCtx.fallbackToSlam)
-					statusText(orange, "Head tracker " + serial + " is not tracking. The headset uses its own tracking until it is back.");
-				else
+				// A tracker missing from this session keeps the override off, so the headset keeps its own tracking.
+				else if (!CalCtx.fallbackToSlam && CalCtx.targetID < vr::k_unMaxTrackedDeviceCount)
 					statusText(orange, "Head tracker " + serial + " is not tracking. Headset tracking is paused until it is back.");
+				else
+					statusText(orange, "Head tracker " + serial + " is not tracking. The headset uses its own tracking until it is back.");
 			}
 			else if (acquire.state == AcquireState::Off)
 				statusText(gray, "No head tracker. Press Calibrate, then move your head to identify the headset tracker.");
