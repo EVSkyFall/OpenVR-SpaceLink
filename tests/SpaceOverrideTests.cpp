@@ -9,6 +9,7 @@
 #include "ProfileCodec.h"
 #include "ManualDetection.h"
 #include "OverlayLog.h"
+#include "SpaceMemory.h"
 #include <fstream>
 #include <limits>
 
@@ -1166,6 +1167,295 @@ static void Scenario17()
 		&& line.find("\xED\x97\xA4\xEB\x93\x9C") != std::string::npos, "log must contain local milliseconds and one UTF-8 line per event");
 }
 
+static protocol::DriftState DriftState(const CalibrationContext &profile)
+{
+	const auto hmd = DesiredState({}, profile, false).front().setHmdTracker;
+	Eigen::Quaterniond drift(Eigen::AngleAxisd(0.37, Eigen::Vector3d::UnitY()));
+	return { 0xfedcba9876543210ULL, true, 120, { drift.w(), drift.x(), drift.y(), drift.z() }, { 0.24, -0.13, 0.36 },
+		profile.calibratedScale / profile.hmdScale, true, false, hmd.offsetRotation, hmd.offsetTranslation,
+		hmd.calibrationRotation, hmd.calibrationTranslation, hmd.calibrationScale, hmd.hmdScale };
+}
+
+static Eigen::Quaterniond Q(const vr::HmdQuaternion_t &q) { return { q.w, q.x, q.y, q.z }; }
+static Eigen::Vector3d V(const vr::HmdVector3d_t &v) { return { v.v[0], v.v[1], v.v[2] }; }
+
+static std::vector<double *> DriftNumbers(protocol::DriftState &state)
+{
+	return { &state.rotation.w, &state.rotation.x, &state.rotation.y, &state.rotation.z,
+		&state.translation.v[0], &state.translation.v[1], &state.translation.v[2], &state.slamScale,
+		&state.offsetRotation.w, &state.offsetRotation.x, &state.offsetRotation.y, &state.offsetRotation.z,
+		&state.offsetTranslation.v[0], &state.offsetTranslation.v[1], &state.offsetTranslation.v[2],
+		&state.calibrationRotation.w, &state.calibrationRotation.x, &state.calibrationRotation.y, &state.calibrationRotation.z,
+		&state.calibrationTranslation.v[0], &state.calibrationTranslation.v[1], &state.calibrationTranslation.v[2],
+		&state.calibrationScale, &state.hmdScale };
+}
+
+static std::vector<double *> ProfileBasisNumbers(CalibrationContext &profile)
+{
+	return { &profile.calibratedRotation.x(), &profile.calibratedRotation.y(), &profile.calibratedRotation.z(),
+		&profile.calibratedTranslation.x(), &profile.calibratedTranslation.y(), &profile.calibratedTranslation.z(),
+		&profile.relativeRotation.w, &profile.relativeRotation.x, &profile.relativeRotation.y, &profile.relativeRotation.z,
+		&profile.relativeTranslation.v[0], &profile.relativeTranslation.v[1], &profile.relativeTranslation.v[2],
+		&profile.calibratedScale, &profile.hmdScale };
+}
+
+static void Scenario18()
+{
+	std::mt19937 random(0x5ace);
+	std::uniform_real_distribution<double> number(-1.0, 1.0);
+	for (double scale : { 1.0, 1.03 })
+		for (int trial = 0; trial < 100; ++trial)
+		{
+			auto profile = Profile();
+			profile.calibratedRotation = Eigen::Vector3d(number(random), number(random), number(random)) * 179.0;
+			profile.calibratedTranslation = Eigen::Vector3d(number(random), number(random), number(random)) * 250.0;
+			profile.calibratedScale = 1.017;
+			profile.hmdScale = profile.calibratedScale / scale;
+			auto state = DriftState(profile);
+			Eigen::Quaterniond drift(Eigen::AngleAxisd(number(random) * EIGEN_PI, Eigen::Vector3d::UnitY()));
+			state.rotation = { drift.w(), drift.x(), drift.y(), drift.z() };
+			state.translation = { number(random), number(random), number(random) };
+			const auto original = profile;
+			const auto folded = spacememory::Fold(state);
+			profile.calibratedRotation = folded.rotation;
+			profile.calibratedTranslation = folded.translation;
+			const auto packet = DesiredState(Devices(), profile, false).front().setHmdTracker;
+			const Eigen::Quaterniond expected = drift.inverse() * Q(state.calibrationRotation);
+			Check((Q(packet.calibrationRotation).toRotationMatrix() - expected.toRotationMatrix()).norm() < 1e-12,
+				"folded Euler degrees must round-trip through DesiredState with nonzero roll and pitch");
+			Check((V(packet.calibrationTranslation) - drift.inverse() * (V(state.calibrationTranslation) - V(state.translation))).norm() < 1e-12,
+				"folded translation must rotate the subtracted drift and preserve centimeter conversion");
+			for (int point = 0; point < 8; ++point)
+			{
+				Eigen::Vector3d raw(number(random), number(random), number(random));
+				Eigen::Vector3d lighthouse = Q(state.calibrationRotation).inverse()
+					* (drift * (scale * raw) + V(state.translation) - V(state.calibrationTranslation)) / original.calibratedScale;
+				Eigen::Vector3d corrected = Q(packet.calibrationRotation) * (packet.calibrationScale * lighthouse) + V(packet.calibrationTranslation);
+				Check((corrected - scale * raw).norm() < 1e-11, "fold must align lighthouse and scaled raw points for both SLAM scales");
+			}
+			Check(profile.calibratedScale == original.calibratedScale && profile.hmdScale == original.hmdScale
+				&& profile.targetModelScale == original.targetModelScale, "fold must leave calibration, HMD and model scales untouched");
+		}
+	Check(protocol::Version == 8 && sizeof(protocol::DriftState) == 224 && sizeof(protocol::Response) == 232,
+		"v8 drift snapshot and response layout must agree on the wire");
+	std::printf("SPACE-PROTOCOL: Version=%u DriftState=%zu Response=%zu\n", protocol::Version, sizeof(protocol::DriftState), sizeof(protocol::Response));
+}
+
+static void Scenario19()
+{
+	const auto profile = Profile();
+	auto state = DriftState(profile);
+	const auto capture = spacememory::Capture(state, profile);
+	Check(capture && capture->session == state.session && capture->basis.trackerSerial == profile.trackerSerial,
+		"settled bound capture must retain session and tracker identity");
+	const auto folded = spacememory::Fold(state);
+	Check(capture->alignment.rotation == folded.rotation && capture->alignment.translation == folded.translation,
+		"capture must use the folded alignment");
+	for (const auto &change : std::vector<std::function<void(protocol::DriftState &)>>{
+		[](auto &s) { s.valid = false; }, [](auto &s) { s.enabled = false; }, [](auto &s) { s.native = true; },
+		[](auto &s) { s.updatesSinceChange = 119; }, [](auto &s) { s.session = 0; } })
+	{
+		auto invalid = state;
+		change(invalid);
+		Check(!spacememory::Capture(invalid, profile), "invalid, disabled, native, unsettled or sessionless drift must not capture");
+	}
+	for (const auto &change : std::vector<std::function<void(CalibrationContext &)>>{
+		[](auto &p) { p.validProfile = false; }, [](auto &p) { p.trackerSerial.clear(); },
+		[](auto &p) { p.validRelativeOffset = false; }, [](auto &p) { p.enableNative = true; } })
+	{
+		auto invalid = profile;
+		change(invalid);
+		Check(!spacememory::Capture(state, invalid), "unbound or native profile must not capture");
+	}
+	for (double invalid : { std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity() })
+	{
+		for (size_t index = 0; index < DriftNumbers(state).size(); ++index)
+		{
+			auto changed = state;
+			*DriftNumbers(changed)[index] = invalid;
+			Check(!spacememory::Capture(changed, profile), "every drift and echo number must be finite before capture");
+		}
+		auto copy = profile;
+		for (size_t index = 0; index < ProfileBasisNumbers(copy).size(); ++index)
+		{
+			auto changed = profile;
+			*ProfileBasisNumbers(changed)[index] = invalid;
+			Check(!spacememory::Capture(state, changed), "every profile basis number must be finite before capture");
+		}
+	}
+	auto echoed = state;
+	echoed.calibrationTranslation.v[0] += 0.25;
+	echoed.calibrationScale = 1.03;
+	echoed.hmdScale = 1.01;
+	echoed.offsetTranslation.v[1] -= 0.02;
+	const auto echoCapture = spacememory::Capture(echoed, profile);
+	Check(echoCapture && echoCapture->basis.calibrationTranslation.v[0] == echoed.calibrationTranslation.v[0]
+		&& echoCapture->basis.calibrationScale == echoed.calibrationScale && echoCapture->basis.hmdScale == echoed.hmdScale
+		&& echoCapture->basis.offsetTranslation.v[1] == echoed.offsetTranslation.v[1]
+		&& echoCapture->alignment.translation == spacememory::Fold(echoed).translation,
+		"capture must use the driver echo rather than substituting the current profile");
+}
+
+static void Scenario20()
+{
+	using Result = spacememory::RestoreResult;
+	const auto profile = Profile();
+	const auto before = EncodeProfile(profile);
+	const auto state = DriftState(profile);
+	const auto stored = spacememory::Capture(state, profile);
+	const auto restored = spacememory::Restore(stored, profile, state.session + 1);
+	Check(restored.result == Result::Applied && restored.alignment.rotation == stored->alignment.rotation
+		&& restored.alignment.translation == stored->alignment.translation, "new session with matching basis must restore the captured alignment");
+	Check(spacememory::Restore(stored, profile, state.session).result == Result::SameSession && EncodeProfile(profile) == before,
+		"same driver session must keep the profile unchanged");
+	auto loaded = Profile();
+	std::string error;
+	Check(DecodeProfile(before, loaded, error) && spacememory::Restore(stored, loaded, state.session + 1).result == Result::Applied,
+		"loaded profile basis must use the exact DesiredState conversion");
+	auto copy = profile;
+	for (size_t index = 0; index < ProfileBasisNumbers(copy).size(); ++index)
+	{
+		auto changed = profile;
+		*ProfileBasisNumbers(changed)[index] += 0.1;
+		Check(spacememory::Restore(stored, changed, state.session + 1).result == Result::BasisMismatch,
+			"each calibration, offset and scale component must participate in the restore basis");
+		Check(spacememory::Restore(stored, changed, state.session).result == Result::BasisMismatch,
+			"stale basis must be discarded even in the captured session");
+	}
+	copy.trackerSerial += "-different";
+	Check(spacememory::Restore(stored, copy, state.session + 1).result == Result::BasisMismatch, "tracker serial must participate in the restore basis");
+	for (const auto &change : std::vector<std::function<void(CalibrationContext &)>>{
+		[](auto &p) { p.validProfile = false; }, [](auto &p) { p.trackerSerial.clear(); },
+		[](auto &p) { p.validRelativeOffset = false; }, [](auto &p) { p.enableNative = true; } })
+	{
+		copy = profile;
+		change(copy);
+		Check(spacememory::Restore(stored, copy, state.session + 1).result == Result::NotBound, "unbound or native profile cannot restore");
+	}
+	Check(spacememory::Restore({}, profile, state.session + 1).result == Result::Absent
+		&& spacememory::Restore(spacememory::Decode("broken"), profile, state.session + 1).result == Result::Absent,
+		"absent and malformed memory must restore as absent");
+	copy = profile;
+	copy.calibratedTranslation.x() += 0.00005;
+	copy.relativeTranslation.v[1] += 0.0000005;
+	copy.relativeRotation.x += 0.0000005;
+	copy.calibratedRotation.x() += 0.00001;
+	copy.calibratedScale += 0.0000005;
+	copy.hmdScale += 0.0000005;
+	Check(spacememory::Restore(stored, copy, state.session + 1).result == Result::Applied, "basis tolerance must allow sub-micrometer and rounding changes");
+	copy = profile;
+	copy.calibratedTranslation.x() += 0.0002;
+	Check(spacememory::Restore(stored, copy, state.session + 1).result == Result::BasisMismatch, "basis tolerance must compare meters after centimeter conversion");
+	copy = profile;
+	copy.relativeRotation.w = -copy.relativeRotation.w;
+	Check(spacememory::Restore(stored, copy, state.session + 1).result == Result::Applied, "equivalent quaternion signs must describe the same basis");
+	copy = profile;
+	copy.calibratedRotation.z() += 360;
+	Check(spacememory::Restore(stored, copy, state.session + 1).result == Result::Applied, "equivalent Euler angles must compare as their DesiredState quaternion");
+	copy = profile;
+	copy.targetModelScale *= 1.01;
+	copy.fallbackToSlam = !copy.fallbackToSlam;
+	copy.headFilterEnabled = !copy.headFilterEnabled;
+	Check(spacememory::Restore(stored, copy, state.session + 1).result == Result::Applied, "unrelated profile settings must not change the specified basis");
+	for (const auto &[result, name] : std::vector<std::pair<Result, const char *>>{
+		{ Result::Applied, "applied" }, { Result::SameSession, "same-session" }, { Result::BasisMismatch, "basis-mismatch" },
+		{ Result::NotBound, "not-bound" }, { Result::Absent, "absent" } })
+		Check(std::string(spacememory::ResultName(result)) == name, "restore result names must match the overlay log contract");
+}
+
+static void Scenario21()
+{
+	const auto profile = Profile();
+	const auto stored = spacememory::Capture(DriftState(profile), profile);
+	const auto encoded = spacememory::Encode(*stored);
+	const auto decoded = spacememory::Decode(encoded);
+	Check(decoded && decoded->session == stored->session && spacememory::Encode(*decoded) == encoded,
+		"stored alignment, basis and all 64 session bits must round-trip losslessly");
+	picojson::value value;
+	Check(picojson::parse(value, encoded).empty(), "encoded memory must be JSON");
+	auto object = value.get<picojson::object>();
+	object["future"] = picojson::value(true);
+	object["basis"].get<picojson::object>()["future"] = picojson::value(42.0);
+	Check(spacememory::Decode(picojson::value(object).serialize())
+		&& spacememory::Encode(*spacememory::Decode(picojson::value(object).serialize())) == encoded, "unknown fields at either level must be ignored");
+	for (const auto &[key, unused] : value.get<picojson::object>())
+	{
+		auto missing = value.get<picojson::object>();
+		missing.erase(key);
+		Check(!spacememory::Decode(picojson::value(missing).serialize()), "every top-level memory field must be present");
+		missing[key] = picojson::value(false);
+		Check(!spacememory::Decode(picojson::value(missing).serialize()), "wrong top-level types must be absent");
+	}
+	for (const auto &[key, unused] : value.get("basis").get<picojson::object>())
+	{
+		auto missing = value.get<picojson::object>();
+		missing["basis"].get<picojson::object>().erase(key);
+		Check(!spacememory::Decode(picojson::value(missing).serialize()), "every basis field must be present");
+		missing["basis"].get<picojson::object>()[key] = picojson::value(false);
+		Check(!spacememory::Decode(picojson::value(missing).serialize()), "wrong basis field types must be absent");
+	}
+	for (const auto &invalid : std::vector<std::string>{ "", "[", "{}", "[]", "null", encoded + " trailing" })
+		Check(!spacememory::Decode(invalid), "missing or malformed JSON must be absent");
+	Check(spacememory::Decode(encoded + " \r\n\t").has_value(), "trailing JSON whitespace must remain valid");
+	for (const char *session : { "", "0", "-1", "xyz", "10000000000000000", "123x", "0x123" })
+	{
+		auto malformed = value.get<picojson::object>();
+		malformed["session"] = picojson::value(std::string(session));
+		Check(!spacememory::Decode(picojson::value(malformed).serialize()), "malformed, overflowing or zero session identity must be absent");
+	}
+	auto emptySerial = value.get<picojson::object>();
+	emptySerial["basis"].get<picojson::object>()["trackerSerial"] = picojson::value(std::string());
+	Check(!spacememory::Decode(picojson::value(emptySerial).serialize()), "empty persisted tracker identity must be absent");
+	for (const char *key : { "rotation", "translation", "calibrationRotation", "calibrationTranslation", "offsetRotation", "offsetTranslation" })
+	{
+		for (int change = 0; change < 3; ++change)
+		{
+			auto malformed = value.get<picojson::object>();
+			auto &field = malformed.contains(key) ? malformed[key] : malformed["basis"].get<picojson::object>()[key];
+			auto &numbers = field.get<picojson::array>();
+			if (change == 0) numbers.pop_back();
+			if (change == 1) numbers.emplace_back(0.0);
+			if (change == 2) numbers[0] = picojson::value("NaN");
+			Check(!spacememory::Decode(picojson::value(malformed).serialize()), "every stored vector must have exact finite numeric components");
+		}
+	}
+	std::string overflow = encoded;
+	const auto scale = overflow.find("\"calibrationScale\":");
+	Check(scale != std::string::npos, "codec fixture must contain calibration scale");
+	const auto start = scale + std::string("\"calibrationScale\":").size();
+	overflow.replace(start, overflow.find(',', start) - start, "1e999");
+	Check(!spacememory::Decode(overflow), "non-finite JSON numbers must be absent");
+}
+
+static void Scenario22()
+{
+	const auto stored = spacememory::Capture(DriftState(Profile()), Profile());
+	Check(!spacememory::ShouldWrite({}, {}, 20, 0) && !spacememory::ShouldWrite({}, {}, 20, 0, true), "absent captures must never write");
+	Check(!spacememory::ShouldWrite(stored, {}, 9.999, 0) && spacememory::ShouldWrite(stored, {}, 10, 0),
+		"first capture must respect the ten-second cadence");
+	Check(!spacememory::ShouldWrite(stored, stored, 100, 0) && !spacememory::ShouldWrite(stored, stored, 100, 0, true),
+		"unchanged captures must not write periodically or at exit");
+	auto changed = stored;
+	changed->alignment.translation.x() += 0.001;
+	Check(!spacememory::ShouldWrite(changed, stored, 19.999, 10) && spacememory::ShouldWrite(changed, stored, 20, 10),
+		"changed capture must wait until exactly ten seconds after the last successful write");
+	Check(spacememory::ShouldWrite(changed, stored, 10.001, 10, true) && spacememory::ShouldWrite(stored, {}, 0, 0, true),
+		"exit must write the latest pending capture regardless of cadence");
+	for (int field = 0; field < 3; ++field)
+	{
+		changed = stored;
+		if (field == 0) changed->alignment.rotation.y() += 0.01;
+		if (field == 1) changed->session += 1;
+		if (field == 2) changed->basis.trackerSerial += "-new";
+		Check(spacememory::ShouldWrite(changed, stored, 20, 10), "rotation, session and basis changes must count as pending writes");
+	}
+	std::optional<spacememory::StoredAlignment> written;
+	Check(spacememory::ShouldWrite(stored, written, 20, 0) && spacememory::ShouldWrite(stored, written, 21, 0),
+		"failed writes must stay pending and retry");
+	written = stored;
+	Check(!spacememory::ShouldWrite(stored, written, 40, 20), "successful writes must suppress unchanged retries");
+}
+
 static void Benchmark()
 {
 	Hypothesis hypothesis;
@@ -1183,10 +1473,10 @@ static void Benchmark()
 int main(int argc, char **argv)
 {
 	const std::function<void()> scenarios[] = { Scenario1, Scenario2, Scenario3, Scenario4, Scenario5, Scenario6, Scenario7,
-		Scenario8, Scenario9, Scenario10, Scenario11, Scenario12, Scenario13, Scenario14, Scenario15, Scenario16, Scenario17 };
+		Scenario8, Scenario9, Scenario10, Scenario11, Scenario12, Scenario13, Scenario14, Scenario15, Scenario16, Scenario17, Scenario18, Scenario19, Scenario20, Scenario21, Scenario22 };
 	try
 	{
-		for (int i = 0; i < 17; ++i)
+		for (int i = 0; i < 22; ++i)
 		{
 			if (argc > 1 && std::atoi(argv[1]) != i + 1)
 				continue;
