@@ -11,6 +11,7 @@
 #include "DesiredState.h"
 #include "ManualDetection.h"
 #include "OverlayLog.h"
+#include "SpaceMemory.h"
 
 #include <algorithm>
 #include <cctype>
@@ -37,6 +38,10 @@ static std::string SolveSerial;
 static size_t SolveKeyframes = 0;
 static bool SolveAutomatic = false;
 static bool RawPoseReady = false;
+static bool SpaceLinkPending = false;
+static uint64_t LastSpaceSession = 0;
+static double LastSpacePoll = -1, LastSpaceWrite = 0;
+static std::optional<spacememory::StoredAlignment> LatestSpace, WrittenSpace;
 static vr::VRNotificationId (*ShowCalibrationNotification)(const char *, vr::EVRNotificationType) = nullptr;
 static void (*RemoveCalibrationNotification)(vr::VRNotificationId) = nullptr;
 
@@ -117,8 +122,117 @@ static bool SendCommands(const std::vector<protocol::Request> &commands)
 	}
 }
 
+static std::optional<protocol::DriftState> ReadDriftState()
+{
+	try
+	{
+		return Driver.GetDriftState();
+	}
+	catch (const std::exception &error)
+	{
+		overlaylog::Write("space-read-error error=", std::quoted(error.what()));
+		Driver.Disconnect(error.what(), CalCtx.timeLastTick);
+		AppliedSpace = {};
+		RawPoseReady = false;
+		return std::nullopt;
+	}
+}
+
+static void LogSpaceRestore(const char *result, const spacememory::Alignment &alignment = {})
+{
+	overlaylog::Write("space-restore result=", result, " yaw_deg=", alignment.rotation.y(),
+		" translation_m=", alignment.translation.norm() * 0.01);
+}
+
+static void PrepareSpaceRestore()
+{
+	if (!SpaceLinkPending || !Driver.Connected())
+		return;
+	// Consume before sending any desired state; a late polling reply must never fold mid-session.
+	SpaceLinkPending = false;
+	LastSpacePoll = CalCtx.timeLastTick;
+	const auto state = ReadDriftState();
+	if (!state || !state->session || state->session == LastSpaceSession)
+		return;
+	LastSpaceSession = state->session;
+	LatestSpace.reset();
+	WrittenSpace.reset();
+	try
+	{
+		if (!ProfileReadSucceeded() || LoadLastSpace(WrittenSpace) == ReadResult::Error)
+		{
+			LogSpaceRestore("read-error");
+			return;
+		}
+		const auto restore = spacememory::Restore(WrittenSpace, CalCtx, state->session);
+		LogSpaceRestore(spacememory::ResultName(restore.result), restore.alignment);
+		if (restore.result == spacememory::RestoreResult::Applied)
+		{
+			CalCtx.calibratedRotation = restore.alignment.rotation;
+			CalCtx.calibratedTranslation = restore.alignment.translation;
+			SaveProfile(CalCtx);
+		}
+		if (restore.result == spacememory::RestoreResult::Applied || restore.result == spacememory::RestoreResult::BasisMismatch
+			|| restore.result == spacememory::RestoreResult::NotBound)
+		{
+			DeleteLastSpace();
+			WrittenSpace.reset();
+		}
+	}
+	catch (const std::exception &error)
+	{
+		overlaylog::Write("space-restore-error error=", std::quoted(error.what()));
+	}
+}
+
+static void WriteSpaceMemory(bool exiting)
+{
+	try
+	{
+		if (!spacememory::ShouldWrite(LatestSpace, WrittenSpace, CalCtx.timeLastTick, LastSpaceWrite, exiting)
+			|| !SaveLastSpace(*LatestSpace))
+			return;
+		WrittenSpace = LatestSpace;
+		LastSpaceWrite = CalCtx.timeLastTick;
+		if (exiting)
+			overlaylog::Write("space-capture session=", std::hex, LatestSpace->session, std::dec,
+				" yaw_deg=", LatestSpace->alignment.rotation.y(), " translation_m=", LatestSpace->alignment.translation.norm() * 0.01);
+	}
+	catch (const std::exception &error)
+	{
+		overlaylog::Write("space-write-error error=", std::quoted(error.what()));
+	}
+}
+
+void FlushSpaceMemory()
+{
+	WriteSpaceMemory(true);
+}
+
+static void PollSpaceMemory(double time)
+{
+	if (!Driver.Connected() || time - LastSpacePoll < 1.0)
+		return;
+	LastSpacePoll = time;
+	const auto state = ReadDriftState();
+	if (state && state->session)
+	{
+		if (state->session != LastSpaceSession)
+		{
+			LastSpaceSession = state->session;
+			LatestSpace.reset();
+			WrittenSpace.reset();
+			LogSpaceRestore("read-error");
+		}
+		if (auto capture = spacememory::Capture(*state, CalCtx))
+			LatestSpace = std::move(capture);
+	}
+	WriteSpaceMemory(false);
+}
+
 static void ApplyCommittedState()
 {
+	PrepareSpaceRestore();
 	CalCtx.targetID = ResolveSerial(Devices, CalCtx.trackerSerial);
 	CalCtx.enabled = CalCtx.validProfile;
 	bool sampling = Attempt && CalCtx.state == CalibrationState::Sampling;
@@ -130,6 +244,7 @@ static void ApplyCommittedState()
 
 void SendOneEuroParams()
 {
+	PrepareSpaceRestore();
 	auto commands = DesiredState({}, CalCtx, false);
 	SendCommands({ commands.back() });
 }
@@ -187,6 +302,9 @@ void CalibrationContext::Clear()
 {
 	if (this == &CalCtx)
 	{
+		LatestSpace.reset();
+		WrittenSpace.reset();
+		DeleteLastSpace();
 		LogAttemptEnd("cancel", "removed");
 		RemoveCalibrationState(*this, Attempt, Acquisition);
 		Acquisition.Refresh(Devices);
@@ -236,7 +354,7 @@ void SetCalibrationNotificationHandler(vr::VRNotificationId (*show)(const char *
 
 void InitCalibrator()
 {
-	Driver.Connect();
+	SpaceLinkPending = Driver.Connect();
 }
 
 HeadTrackerState GetHeadTrackerState()
@@ -624,6 +742,7 @@ void CalibrationTick(double time)
 	const auto observationSpace = AppliedSpace;
 	bool wasRaw = RawPoseReady;
 	bool connected = Driver.Connect(time);
+	if (connected) SpaceLinkPending = true;
 	bool scan = Devices.empty() || time - CalCtx.timeLastScan >= 1.0;
 	if (scan)
 	{
@@ -642,6 +761,7 @@ void CalibrationTick(double time)
 	LogDeviceAndAcquisitionChanges();
 	if (scan || connected || (CalCtx.state == CalibrationState::Editing && time - LastApply >= 0.1))
 		ApplyCommittedState();
+	PollSpaceMemory(time);
 	if (scan && CalCtx.validProfile && CalCtx.chaperone.valid && CalCtx.chaperone.autoApply)
 	{
 		uint32_t quadCount = 0;

@@ -52,6 +52,17 @@ protocol::Response IPCClient::SendBlocking(const protocol::Request &request)
 	return Receive();
 }
 
+std::optional<protocol::DriftState> IPCClient::GetDriftState()
+{
+	protocol::Request request;
+	std::memset(&request, 0, sizeof request);
+	request.type = protocol::RequestGetDriftState;
+	const auto response = SendBlocking(request);
+	if (response.type != protocol::ResponseDriftState)
+		return std::nullopt;
+	return response.driftState;
+}
+
 void IPCClient::Send(const protocol::Request &request)
 {
 	DWORD bytesWritten;
