@@ -1412,10 +1412,10 @@ static void Scenario23()
 		}
 	}
 	auto echoed = state;
-	echoed.calibrationTranslation.v[0] += 0.25;
-	echoed.calibrationScale = 1.03;
-	echoed.hmdScale = 1.01;
-	echoed.offsetTranslation.v[1] -= 0.02;
+	echoed.calibrationTranslation.v[0] += 0.0000005;
+	echoed.calibrationScale += 0.0000005;
+	echoed.hmdScale += 0.0000005;
+	echoed.offsetTranslation.v[1] -= 0.0000005;
 	const auto echoCapture = spacememory::Capture(echoed, profile);
 	Check(echoCapture && echoCapture->basis.calibrationTranslation.v[0] == echoed.calibrationTranslation.v[0]
 		&& echoCapture->basis.calibrationScale == echoed.calibrationScale && echoCapture->basis.hmdScale == echoed.hmdScale
@@ -1584,6 +1584,122 @@ static void Scenario26()
 	Check(!spacememory::ShouldWrite(stored, written, 40, 20), "successful writes must suppress unchanged retries");
 }
 
+static void Scenario27()
+{
+	const auto profile = Profile();
+	const auto state = DriftState(profile);
+	Check(spacememory::Capture(state, profile).has_value(), "matching echo must capture");
+	for (const auto &[change, name] : std::vector<std::pair<std::function<void(protocol::DriftState &, double)>, const char *>>{
+		{ [](auto &s, double delta) { s.calibrationRotation.x += delta; }, "calibration rotation echo comparison" },
+		{ [](auto &s, double delta) { s.calibrationTranslation.v[0] += delta; }, "calibration translation echo comparison" },
+		{ [](auto &s, double delta) { s.offsetRotation.x += delta; }, "offset rotation echo comparison" },
+		{ [](auto &s, double delta) { s.offsetTranslation.v[0] += delta; }, "offset translation echo comparison" },
+		{ [](auto &s, double delta) { s.calibrationScale += delta; }, "calibration scale echo comparison" },
+		{ [](auto &s, double delta) { s.hmdScale += delta; }, "HMD scale echo comparison" } })
+	{
+		auto changed = state;
+		change(changed, 0.000002);
+		Check(!spacememory::Capture(changed, profile), name);
+		changed = state;
+		change(changed, 0.0000005);
+		Check(spacememory::Capture(changed, profile).has_value(), name);
+	}
+	for (bool calibration : { true, false })
+	{
+		auto changed = state;
+		auto &q = calibration ? changed.calibrationRotation : changed.offsetRotation;
+		q = { -q.w, -q.x, -q.y, -q.z };
+		Check(spacememory::Capture(changed, profile).has_value(),
+			calibration ? "calibration q/-q echo must capture" : "offset q/-q echo must capture");
+	}
+}
+
+static void Scenario28()
+{
+	const auto profile = Profile();
+	const auto stored = spacememory::Capture(DriftState(profile), profile);
+	const auto session = stored->session + 1;
+	const auto previousSession = stored->session;
+	CalibrationContext loaded, beforeRead;
+	PersistenceState storage;
+	std::string error;
+	ApplyProfileRead(ReadResult::Error, "", loaded, beforeRead, storage, error);
+	const auto pending = spacememory::PrepareRestore(storage.resolved, session, previousSession, 0);
+	Check(!pending.consumeLink, "pending profile must preserve the restore link");
+	Check(!pending.claimSession, "pending profile must leave the last session untouched");
+	Check(pending.logProfilePending, "first pending profile read must log its driver session");
+	const auto repeated = spacememory::PrepareRestore(false, session, previousSession, session);
+	Check(!repeated.logProfilePending, "repeated pending read or reconnect must not log the same driver session again");
+	Check(spacememory::PrepareRestore(false, session + 1, previousSession, session).logProfilePending,
+		"a different driver session must get its own pending profile log");
+	const auto unknown = spacememory::PrepareRestore(false, 0, previousSession, session);
+	Check(!unknown.consumeLink && !unknown.claimSession && !unknown.logProfilePending,
+		"pending profile without a drift session must defer without claiming or logging one");
+	Check(!spacememory::ShouldPoll(true, true, 100, 0), "pending restore must prevent polling, capture and session claims");
+	ApplyProfileRead(ReadResult::Present, EncodeProfile(profile), loaded, beforeRead, storage, error);
+	const auto ready = spacememory::PrepareRestore(storage.resolved, session, previousSession, session);
+	Check(ready.consumeLink, "resolved profile must consume the restore link");
+	Check(ready.claimSession && !ready.logProfilePending, "resolved profile must claim the new session without a pending log");
+	const auto restore = ready.claimSession ? spacememory::Restore(stored, loaded, session) : spacememory::Restoration{};
+	Check(restore.result == spacememory::RestoreResult::Applied && restore.alignment.rotation == stored->alignment.rotation,
+		"the first prepare after profile read success must restore the saved alignment");
+	const auto consumed = spacememory::PrepareRestore(true, session, session, session);
+	Check(consumed.consumeLink && !consumed.claimSession,
+		"a consumed session, including after LastSpace read-error, must not restore again");
+	const auto missing = spacememory::PrepareRestore(true, 0, previousSession, session);
+	Check(missing.consumeLink && !missing.claimSession, "resolved profile with a missing drift reply must keep the existing consume policy");
+	Check(spacememory::ShouldPoll(false, true, 2, 1), "resolved restore must allow the next due poll");
+	Check(!spacememory::ShouldPoll(false, false, 2, 1), "disconnected driver must not poll");
+	Check(!spacememory::ShouldPoll(false, true, 1.999, 1), "polling must preserve the existing one-second cadence");
+}
+
+static void Scenario29()
+{
+	for (double yaw : { 120.0, -150.0, 180.0, -180.0 })
+	{
+		auto profile = Profile();
+		profile.calibratedRotation = Eigen::Vector3d(0, yaw, 0);
+		auto state = DriftState(profile);
+		state.rotation = { 1, 0, 0, 0 };
+		const auto angles = spacememory::Fold(state).rotation;
+		Check(std::abs(angles.x()) < 1e-10 && std::abs(angles.z()) < 1e-10,
+			yaw > 0 ? "positive pure yaw must have zero roll and pitch" : "negative pure yaw must have zero roll and pitch");
+		Check(std::abs(angles.y() - (yaw == -180 ? 180 : yaw)) < 1e-10,
+			"pure yaw must retain its angle with -180 represented as 180");
+		Check((angles.array() > -180.0).all() && (angles.array() <= 180.0).all(), "pure yaw angles must be in (-180, 180]");
+	}
+	auto state = DriftState(Profile());
+	state.rotation = { 1, 0, 0, 0 };
+	state.calibrationRotation = { 1e-17, -1, 0, 0 };
+	Check(spacememory::Fold(state).rotation.z() == 180.0, "negative half-turn must wrap to positive 180 degrees");
+}
+
+static void Scenario30()
+{
+	std::mt19937 random(0x5ace27);
+	std::uniform_real_distribution<double> number(-1.0, 1.0);
+	for (int trial = 0; trial < 256; ++trial)
+	{
+		auto profile = Profile();
+		auto state = DriftState(profile);
+		Eigen::Quaterniond calibration(number(random), number(random), number(random), number(random));
+		Eigen::Quaterniond drift(number(random), number(random), number(random), number(random));
+		calibration.normalize();
+		drift.normalize();
+		state.calibrationRotation = { calibration.w(), calibration.x(), calibration.y(), calibration.z() };
+		state.rotation = { drift.w(), drift.x(), drift.y(), drift.z() };
+		const auto angles = spacememory::Fold(state).rotation;
+		Check((angles.array() > -180.0).all() && (angles.array() <= 180.0).all(), "random folded angles must be in (-180, 180]");
+		profile.calibratedRotation = angles;
+		const auto packet = DesiredState({}, profile, false).front().setHmdTracker;
+		const Eigen::Quaterniond expected = drift.inverse() * calibration;
+		Check((Q(packet.calibrationRotation).toRotationMatrix() - expected.toRotationMatrix()).norm() < 1e-12,
+			"canonical folded angles must reproduce the quaternion through DesiredState");
+		Check(std::abs(angles.x()) + std::abs(angles.z()) <= 180.0 + 1e-10,
+			"fold must choose the equivalent triple with the smaller absolute roll plus pitch");
+	}
+}
+
 static void Benchmark()
 {
 	Hypothesis hypothesis;
@@ -1608,10 +1724,10 @@ int main(int argc, char **argv)
 	const std::function<void()> scenarios[] = { Scenario1, Scenario2, Scenario3, Scenario4, Scenario5, Scenario6, Scenario7,
 		Scenario8, Scenario9, Scenario10, Scenario11, Scenario12, Scenario13, Scenario14, Scenario15, Scenario16, Scenario17,
 		Scenario18, Scenario19, Scenario20, Scenario21,
-		Scenario22, Scenario23, Scenario24, Scenario25, Scenario26 };
+		Scenario22, Scenario23, Scenario24, Scenario25, Scenario26, Scenario27, Scenario28, Scenario29, Scenario30 };
 	try
 	{
-		for (int i = 0; i < 26; ++i)
+		for (int i = 0; i < 30; ++i)
 		{
 			if (argc > 1 && std::atoi(argv[1]) != i + 1)
 				continue;

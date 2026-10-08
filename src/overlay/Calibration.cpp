@@ -39,7 +39,7 @@ static size_t SolveKeyframes = 0;
 static bool SolveAutomatic = false;
 static bool RawPoseReady = false;
 static bool SpaceLinkPending = false;
-static uint64_t LastSpaceSession = 0;
+static uint64_t LastSpaceSession = 0, ProfilePendingSession = 0;
 static double LastSpacePoll = -1, LastSpaceWrite = 0;
 static std::optional<spacememory::StoredAlignment> LatestSpace, WrittenSpace;
 static vr::VRNotificationId (*ShowCalibrationNotification)(const char *, vr::EVRNotificationType) = nullptr;
@@ -148,18 +148,27 @@ static void PrepareSpaceRestore()
 {
 	if (!SpaceLinkPending || !Driver.Connected())
 		return;
+	const auto state = ReadDriftState();
+	const auto prepare = spacememory::PrepareRestore(ProfileReadSucceeded(), state ? state->session : 0,
+		LastSpaceSession, ProfilePendingSession);
+	if (prepare.logProfilePending)
+	{
+		ProfilePendingSession = state->session;
+		LogSpaceRestore("profile-pending");
+	}
+	if (!prepare.consumeLink)
+		return;
 	// Consume before sending any desired state; a late polling reply must never fold mid-session.
 	SpaceLinkPending = false;
 	LastSpacePoll = CalCtx.timeLastTick;
-	const auto state = ReadDriftState();
-	if (!state || !state->session || state->session == LastSpaceSession)
+	if (!prepare.claimSession)
 		return;
 	LastSpaceSession = state->session;
 	LatestSpace.reset();
 	WrittenSpace.reset();
 	try
 	{
-		if (!ProfileReadSucceeded() || LoadLastSpace(WrittenSpace) == ReadResult::Error)
+		if (LoadLastSpace(WrittenSpace) == ReadResult::Error)
 		{
 			LogSpaceRestore("read-error");
 			return;
@@ -211,7 +220,7 @@ void FlushSpaceMemory()
 
 static void PollSpaceMemory(double time)
 {
-	if (!Driver.Connected() || time - LastSpacePoll < 1.0)
+	if (!spacememory::ShouldPoll(SpaceLinkPending, Driver.Connected(), time, LastSpacePoll))
 		return;
 	LastSpacePoll = time;
 	const auto state = ReadDriftState();

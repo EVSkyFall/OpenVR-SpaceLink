@@ -479,6 +479,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				else {
 					headVel.reset();
 					trackerFilter.reset();
+					drift.updatesSinceChange = 0;
 					driftValid = drift.valid;
 					driftRotation = drift.rotation;
 					driftTranslation = drift.translation;
