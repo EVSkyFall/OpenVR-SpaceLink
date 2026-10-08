@@ -12,7 +12,7 @@
 
 namespace protocol
 {
-	const uint32_t Version = 7;
+	const uint32_t Version = 8;
 
 	enum RequestType
 	{
@@ -22,6 +22,7 @@ namespace protocol
 		RequestSetHmdTracker,
 		RequestSetSlamSync,
 		RequestSetOneEuro,
+		RequestGetDriftState,
 	};
 
 	enum ResponseType
@@ -29,6 +30,7 @@ namespace protocol
 		ResponseInvalid,
 		ResponseHandshake,
 		ResponseSuccess,
+		ResponseDriftState,
 	};
 
 	struct Protocol
@@ -104,6 +106,24 @@ namespace protocol
 		OneEuroParams drift;
 	};
 
+	struct DriftState
+	{
+		uint64_t session;
+		bool valid;
+		uint64_t updatesSinceChange;
+		vr::HmdQuaternion_t rotation;
+		vr::HmdVector3d_t translation;
+		double slamScale;
+		bool enabled;
+		bool native;
+		vr::HmdQuaternion_t offsetRotation;
+		vr::HmdVector3d_t offsetTranslation;
+		vr::HmdQuaternion_t calibrationRotation;
+		vr::HmdVector3d_t calibrationTranslation;
+		double calibrationScale;
+		double hmdScale;
+	};
+
 	struct Request
 	{
 		RequestType type;
@@ -125,9 +145,10 @@ namespace protocol
 
 		union {
 			Protocol protocol;
+			DriftState driftState;
 		};
 
-		Response() : type(ResponseInvalid) { }
-		Response(ResponseType type) : type(type) { }
+		Response() : type(ResponseInvalid), driftState{} { }
+		Response(ResponseType type) : type(type), driftState{} { }
 	};
 }

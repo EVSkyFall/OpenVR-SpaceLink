@@ -107,6 +107,7 @@ set(SPACE_OVERRIDE_LOGIC_SOURCES
 	"src/overlay/AutoAcquisition.cpp"
 	"src/overlay/ManualDetection.cpp"
 	"src/overlay/OverlayLog.cpp"
+	"src/overlay/SpaceMemory.cpp"
 )
 target_sources(OpenVR-SpaceOverride PRIVATE ${SPACE_OVERRIDE_LOGIC_SOURCES})
 

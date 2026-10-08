@@ -364,6 +364,7 @@ int main(int argc, char** argv)
     }
 
 	SaveProfile(CalCtx, true);
+	FlushSpaceMemory();
 
     VkResult vk_result = vkDeviceWaitIdle(g_vulkanRenderer->Device());
     VK_VALIDATE_RESULT(vk_result);
