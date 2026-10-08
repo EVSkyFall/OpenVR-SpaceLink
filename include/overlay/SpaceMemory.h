@@ -22,6 +22,19 @@ struct Basis
 	std::string trackerSerial;
 };
 
+class TiltRecalibration
+{
+public:
+	bool Update(const protocol::DriftState &state, const CalibrationContext &profile, bool attempting);
+	void Cancel(const CalibrationContext &profile, uint64_t session);
+	void ResetPolls() { previousMismatch = false; }
+
+private:
+	std::optional<Basis> cancelledBasis, previousBasis;
+	uint64_t cancelledSession = 0, previousSession = 0;
+	bool previousMismatch = false;
+};
+
 struct StoredAlignment
 {
 	Alignment alignment;

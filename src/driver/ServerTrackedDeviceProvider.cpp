@@ -138,6 +138,7 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 	catch (...) { LOG("Session entropy unavailable; using clock and process identity"); }
 	if (!session) session = 1;
 	drift.updatesSinceChange = 0;
+	tiltMonitor.Reset();
 
 	memset(transforms, 0, vr::k_unMaxTrackedDeviceCount * sizeof(DeviceTransform));
 	memset(slamSync, 0, sizeof slamSync);
@@ -216,12 +217,16 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 		|| !sameRotation(previous.calibrationRotation, hmdTracker.calibrationRotation)
 		|| !sameTranslation(previous.calibrationTranslation, hmdTracker.calibrationTranslation)
 		|| previous.calibrationScale != hmdTracker.calibrationScale || previous.hmdScale != hmdTracker.hmdScale)
+	{
 		drift.updatesSinceChange = 0;
+		tiltMonitor.Reset();
+	}
 
 	if (!cmd.enabled)
 	{
 		drift.valid = false;
 		drift.updatesSinceChange = 0;
+		tiltMonitor.Reset();
 		drift.rotationFilter.reset();
 		drift.translationFilter.reset();
 		headFilter.reset();
@@ -236,7 +241,8 @@ protocol::DriftState ServerTrackedDeviceProvider::GetDriftState()
 	SharedLock lock(stateLock);
 	return { session, drift.valid, drift.updatesSinceChange, drift.rotation, drift.translation, SlamToCorrectedScale(hmdTracker),
 		hmdTracker.enabled, hmdTracker.native, hmdTracker.offsetRotation, hmdTracker.offsetTranslation,
-		hmdTracker.calibrationRotation, hmdTracker.calibrationTranslation, hmdTracker.calibrationScale, hmdTracker.hmdScale };
+		hmdTracker.calibrationRotation, hmdTracker.calibrationTranslation, hmdTracker.calibrationScale, hmdTracker.hmdScale,
+		tiltMonitor.mismatchDeg, tiltMonitor.samples };
 }
 
 void ServerTrackedDeviceProvider::SetSlamSync(const protocol::SetSlamSync& cmd)
@@ -447,6 +453,9 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 						hmdPosition[2] = trackerRefPosition.v[2] + offset.v[2];
 					}
 
+					if (rawValid)
+						tiltMonitor.Update(hmdRotation, rawRotation, angSpeed, FilterStep(tiltLastUpdate, tiltMonitor.samples != 0));
+
 					if (headFilter.enabled)
 					{
 						double dt = FilterStep(headFilter.lastUpdate, headFilter.valid);
@@ -480,6 +489,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					headVel.reset();
 					trackerFilter.reset();
 					drift.updatesSinceChange = 0;
+					tiltMonitor.Reset();
 					driftValid = drift.valid;
 					driftRotation = drift.rotation;
 					driftTranslation = drift.translation;

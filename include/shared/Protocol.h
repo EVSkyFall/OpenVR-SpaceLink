@@ -12,7 +12,7 @@
 
 namespace protocol
 {
-	const uint32_t Version = 8;
+	const uint32_t Version = 9;
 
 	enum RequestType
 	{
@@ -122,6 +122,8 @@ namespace protocol
 		vr::HmdVector3d_t calibrationTranslation;
 		double calibrationScale;
 		double hmdScale;
+		double tiltMismatchDeg;
+		uint64_t tiltSamples;
 	};
 
 	struct Request

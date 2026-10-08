@@ -9,6 +9,7 @@
 #include "ProfileCodec.h"
 #include "ManualDetection.h"
 #include "SpaceMemory.h"
+#include "TiltMonitor.h"
 #include "OverlayLog.h"
 #include <fstream>
 #include <limits>
@@ -1301,7 +1302,7 @@ static protocol::DriftState DriftState(const CalibrationContext &profile)
 	Eigen::Quaterniond drift(Eigen::AngleAxisd(0.37, Eigen::Vector3d::UnitY()));
 	return { 0xfedcba9876543210ULL, true, 120, { drift.w(), drift.x(), drift.y(), drift.z() }, { 0.24, -0.13, 0.36 },
 		profile.calibratedScale / profile.hmdScale, true, false, hmd.offsetRotation, hmd.offsetTranslation,
-		hmd.calibrationRotation, hmd.calibrationTranslation, hmd.calibrationScale, hmd.hmdScale };
+		hmd.calibrationRotation, hmd.calibrationTranslation, hmd.calibrationScale, hmd.hmdScale, 0.0, 30 };
 }
 
 static Eigen::Quaterniond Q(const vr::HmdQuaternion_t &q) { return { q.w, q.x, q.y, q.z }; }
@@ -1364,8 +1365,9 @@ static void Scenario22()
 			Check(profile.calibratedScale == original.calibratedScale && profile.hmdScale == original.hmdScale
 				&& profile.targetModelScale == original.targetModelScale, "fold must leave calibration, HMD and model scales untouched");
 		}
-	Check(protocol::Version == 8 && sizeof(protocol::DriftState) == 224 && sizeof(protocol::Response) == 232,
-		"v8 drift snapshot and response layout must agree on the wire");
+	Check(protocol::Version == 9 && sizeof(protocol::DriftState) == 240 && sizeof(protocol::Response) == 248
+		&& offsetof(protocol::DriftState, tiltMismatchDeg) == 224 && offsetof(protocol::DriftState, tiltSamples) == 232,
+		"v9 drift snapshot must append tilt fields and agree on the wire");
 	std::printf("SPACE-PROTOCOL: Version=%u DriftState=%zu Response=%zu\n", protocol::Version, sizeof(protocol::DriftState), sizeof(protocol::Response));
 }
 
@@ -1700,6 +1702,191 @@ static void Scenario30()
 	}
 }
 
+static vr::HmdQuaternion_t VrQ(const Eigen::Quaterniond &q) { return { q.w(), q.x(), q.y(), q.z() }; }
+
+static void Scenario31()
+{
+	const Eigen::Quaterniond identity = Eigen::Quaterniond::Identity();
+	auto mismatch = [](const Eigen::Quaterniond &derived, const Eigen::Quaterniond &raw) {
+		return tilt::MismatchDegrees(VrQ(derived), VrQ(raw));
+	};
+	Check(mismatch(identity, identity) == 0, "tilt identity must be zero");
+	for (const auto &rotation : { Rotation(0.2, -0.8, 0.3), Rotation(-1.2, 2.6, -0.5) })
+	{
+		const Eigen::Quaterniond raw(rotation);
+		Check(mismatch(raw, raw) < 1e-5, "any common head rotation must have zero tilt mismatch");
+		const Eigen::Quaterniond yaw(Eigen::AngleAxisd(2.1, Eigen::Vector3d::UnitY()));
+		Check(mismatch(yaw * raw, raw) < 1e-5, "world yaw drift must not contribute to tilt mismatch");
+	}
+	const Eigen::Quaterniond halfYaw(Eigen::AngleAxisd(EIGEN_PI, Eigen::Vector3d::UnitY()));
+	for (double t : { 0.0, 5.0, 20.0, 40.0 })
+	{
+		const Eigen::Quaterniond raw(Rotation(t * Degrees, 0.4));
+		Check(std::abs(mismatch(raw * halfYaw, raw) - 2 * t) < 1e-5,
+			"local vertical half-turn must give twice the head tilt at 0, 5, 20 and 40 degrees");
+	}
+	Check(std::abs(mismatch(Eigen::Quaterniond(Rotation(EIGEN_PI, 0)), identity) - 180) < 1e-5, "pitch flip must give 180 degrees");
+	Check(std::abs(mismatch(Eigen::Quaterniond(Rotation(0, 0, EIGEN_PI)), identity) - 180) < 1e-5, "roll flip must give 180 degrees");
+	const Eigen::Quaterniond raw(Rotation(0.6, -0.8, 0.3)), space(Rotation(0, 1.7));
+	for (const auto &mount : { Eigen::Quaterniond(Rotation(-0.7, 1.8, 2.1)), halfYaw, Eigen::Quaterniond(Rotation(EIGEN_PI, 0)) })
+	{
+		const Eigen::Quaterniond tracker = space.inverse() * raw * mount;
+		const Eigen::Quaterniond offset = mount.inverse();
+		Check(mismatch(space * tracker * offset, raw) < 1e-5, "correct offset must accept arbitrary and inverted calibrated mounts");
+		Check(mismatch(tracker * offset, raw) < 1e-5, "native calibrated mount must ignore world yaw drift");
+	}
+}
+
+static void Scenario32()
+{
+	tilt::Monitor monitor;
+	const auto raw = VrQ(Eigen::Quaterniond::Identity());
+	const auto low = VrQ(Eigen::Quaterniond(Rotation(20 * Degrees, 0)));
+	const auto high = VrQ(Eigen::Quaterniond(Rotation(80 * Degrees, 0)));
+	Check(monitor.samples == 0 && monitor.mismatchDeg == 0, "tilt monitor must start empty");
+	monitor.Update(low, raw, 1.001, 0.1);
+	Check(monitor.samples == 0 && monitor.mismatchDeg == 0, "fast first frame must not prime the monitor");
+	monitor.Update(low, raw, 0, 0);
+	Check(monitor.samples == 1 && std::abs(monitor.mismatchDeg - 20) < 1e-10, "first contributing frame must take its full value even at zero dt");
+	monitor.Update(high, raw, 0.5, 0.15);
+	const double expected = 20 + (1 - std::exp(-0.15 / 0.3)) * 60;
+	Check(monitor.samples == 2 && std::abs(monitor.mismatchDeg - expected) < 1e-10, "tilt smoothing must use the 0.3 second exponential time constant");
+	monitor.Update(low, raw, 0, 0.05);
+	const double next = expected + (1 - std::exp(-0.05 / 0.3)) * (20 - expected);
+	Check(monitor.samples == 3 && std::abs(monitor.mismatchDeg - next) < 1e-10, "smoothing must use each frame dt and count every contributing frame");
+	monitor.Update(high, raw, 1.001, 1.0);
+	Check(monitor.samples == 3 && std::abs(monitor.mismatchDeg - next) < 1e-10, "fast frames must leave both smoothing and sample count unchanged");
+	monitor.Update(high, raw, 1.0, 0.3);
+	Check(monitor.samples == 4 && std::abs(monitor.mismatchDeg - (next + (1 - std::exp(-1.0)) * (80 - next))) < 1e-10,
+		"exactly 1 radian per second must contribute");
+	monitor.Reset();
+	Check(monitor.samples == 0 && monitor.mismatchDeg == 0, "Reset must clear tilt value and contributing count");
+	monitor.Update(high, raw, 0, 0.01);
+	Check(monitor.samples == 1 && std::abs(monitor.mismatchDeg - 80) < 1e-10, "first frame after Reset must replace old smoothing");
+}
+
+static void Scenario33()
+{
+	auto profile = Profile();
+	auto state = DriftState(profile);
+	state.tiltMismatchDeg = 10;
+	spacememory::TiltRecalibration policy;
+	Check(!policy.Update(state, profile, false), "one high tilt poll must not recalibrate");
+	Check(policy.Update(state, profile, false), "two high tilt polls at 10 degrees and 30 frames must recalibrate");
+	state.tiltMismatchDeg = 9.999;
+	Check(!policy.Update(state, profile, false), "a below-threshold tilt poll must break the consecutive pair");
+	state.tiltMismatchDeg = 10;
+	Check(!policy.Update(state, profile, false) && policy.Update(state, profile, false), "a low poll must require two new high polls");
+	state.tiltSamples = 29;
+	Check(!policy.Update(state, profile, false) && !policy.Update(state, profile, false), "29 tilt frames must never trigger");
+	state.tiltSamples = 30;
+	Check(!policy.Update(state, profile, false) && policy.Update(state, profile, false), "30 tilt frames must start a new eligible poll pair");
+	for (int blocked = 0; blocked < 5; ++blocked)
+	{
+		auto echo = state;
+		auto bound = profile;
+		if (blocked == 1) echo.enabled = false;
+		if (blocked == 2) bound.validProfile = false;
+		if (blocked == 3) bound.validRelativeOffset = false;
+		if (blocked == 4) bound.trackerSerial.clear();
+		Check(!policy.Update(echo, bound, blocked == 0) && !policy.Update(echo, bound, blocked == 0),
+			"running attempt, disabled echo or unbound profile must not trigger");
+		Check(!policy.Update(state, profile, false) && policy.Update(state, profile, false), "resuming eligibility must require two fresh polls");
+	}
+	profile.enableNative = state.native = true;
+	profile.autoAcquire = false;
+	state.valid = false;
+	state.updatesSinceChange = 0;
+	policy.ResetPolls();
+	Check(!policy.Update(state, profile, false) && policy.Update(state, profile, false), "native and auto-off must allow tilt recalibration independently of drift validity");
+	policy.ResetPolls();
+	Check(!policy.Update(state, profile, false), "missing drift reply must break the poll pair");
+	++state.session;
+	Check(!policy.Update(state, profile, false) && policy.Update(state, profile, false), "new driver session must require two fresh polls");
+	profile.relativeTranslation.v[0] += 0.001;
+	Check(!policy.Update(state, profile, false) && policy.Update(state, profile, false), "changed profile basis must require two fresh polls");
+}
+
+static void Scenario34()
+{
+	const auto profile = Profile();
+	auto state = DriftState(profile);
+	state.tiltMismatchDeg = 30;
+	spacememory::TiltRecalibration policy;
+	policy.Cancel(profile, state.session);
+	for (int poll = 0; poll < 5; ++poll)
+		Check(!policy.Update(state, profile, false), "user cancel must suppress repeated polls of the same basis and session");
+	auto settings = profile;
+	settings.autoAcquire = false;
+	settings.headFilterEnabled = !settings.headFilterEnabled;
+	settings.predictionTime += 1;
+	Check(!policy.Update(state, settings, false) && !policy.Update(state, settings, false), "unrelated settings must preserve user cancel suppression");
+	auto copy = profile;
+	for (size_t index = 0; index < ProfileBasisNumbers(copy).size(); ++index)
+	{
+		policy.Cancel(profile, state.session);
+		auto changed = profile;
+		*ProfileBasisNumbers(changed)[index] += 1e-8;
+		Check(!policy.Update(state, changed, false) && policy.Update(state, changed, false), "any calibration, offset or scale change must release suppression even below capture tolerance");
+		Check(!policy.Update(state, profile, false) && policy.Update(state, profile, false), "returning to an old basis must not revive a released cancellation");
+	}
+	policy.Cancel(profile, state.session);
+	auto changed = profile;
+	changed.trackerSerial += "-new";
+	Check(!policy.Update(state, changed, false) && policy.Update(state, changed, false), "new tracker binding must release suppression");
+	policy.Cancel(profile, state.session);
+	++state.session;
+	Check(!policy.Update(state, profile, false) && policy.Update(state, profile, false), "new driver session must release user cancel suppression");
+	--state.session;
+	Check(!policy.Update(state, profile, false) && policy.Update(state, profile, false), "old session identity must not revive a released cancellation");
+}
+
+static void Scenario35()
+{
+	const auto profile = Profile();
+	auto state = DriftState(profile);
+	state.tiltMismatchDeg = 4.999;
+	Check(spacememory::Capture(state, profile).has_value(), "space capture must accept 30 tilt frames just below 5 degrees");
+	state.tiltSamples = 29;
+	Check(!spacememory::Capture(state, profile), "space capture must reject fewer than 30 tilt frames");
+	state.tiltSamples = 30;
+	state.tiltMismatchDeg = 5.0;
+	Check(!spacememory::Capture(state, profile), "space capture must reject the exact 5 degree boundary");
+	state.tiltMismatchDeg = 30.0;
+	Check(!spacememory::Capture(state, profile), "space capture must reject a moved mount");
+	state.tiltMismatchDeg = std::numeric_limits<double>::quiet_NaN();
+	Check(!spacememory::Capture(state, profile), "space capture requires measured tilt agreement");
+}
+
+static void Scenario36()
+{
+	auto profile = Profile();
+	const auto before = EncodeProfile(profile);
+	std::optional<CalibrationAttempt> attempt{ std::in_place };
+	Check(std::string(CalibrationAttemptMode(*attempt)) == "manual", "ordinary calibration mode must stay manual");
+	attempt->automatic = true;
+	Check(std::string(CalibrationAttemptMode(*attempt)) == "automatic", "acquisition calibration mode must stay automatic");
+	attempt->automatic = false;
+	attempt->tiltRecalibration = true;
+	attempt->serial = profile.trackerSerial;
+	Check(std::string(CalibrationAttemptMode(*attempt)) == "recalibrate", "tilt attempt log mode must be recalibrate");
+	const auto notice = RecalibrationNotice();
+	Check(notice.text == "Head tracker moved on the headset. Look around naturally for a few seconds to recalibrate."
+		&& notice.type == FoundNotice(profile.trackerSerial).type && notice.type == vr::EVRNotificationType_Persistent,
+		"tilt start notice must use the exact text and persistent found-notice type");
+	AutoAcquisition acquisition;
+	Check(!ApplyAutoAcquireState(profile, attempt, acquisition, false) && attempt && !attempt->automatic,
+		"auto-off must preserve a tilt attempt on the manual calibration path");
+	Check(!DesiredState(Devices(), profile, true, 5).front().setHmdTracker.enabled && profile.trackerSerial == "committed-A",
+		"tilt sampling must disable the override and preserve its binding");
+	DiscardAttempt(profile, attempt);
+	Check(!attempt && EncodeProfile(profile) == before && DesiredState(Devices(), profile, false).front().setHmdTracker.enabled,
+		"discarding a tilt attempt must restore the committed profile and override");
+	const auto ready = ReadyNotice(profile);
+	Check(ready.text == "Head tracker ready: committed-A." && ready.type == vr::EVRNotificationType_Transient,
+		"tilt commit must use the existing ready notice");
+}
+
 static void Benchmark()
 {
 	Hypothesis hypothesis;
@@ -1724,10 +1911,11 @@ int main(int argc, char **argv)
 	const std::function<void()> scenarios[] = { Scenario1, Scenario2, Scenario3, Scenario4, Scenario5, Scenario6, Scenario7,
 		Scenario8, Scenario9, Scenario10, Scenario11, Scenario12, Scenario13, Scenario14, Scenario15, Scenario16, Scenario17,
 		Scenario18, Scenario19, Scenario20, Scenario21,
-		Scenario22, Scenario23, Scenario24, Scenario25, Scenario26, Scenario27, Scenario28, Scenario29, Scenario30 };
+		Scenario22, Scenario23, Scenario24, Scenario25, Scenario26, Scenario27, Scenario28, Scenario29, Scenario30,
+		Scenario31, Scenario32, Scenario33, Scenario34, Scenario35, Scenario36 };
 	try
 	{
-		for (int i = 0; i < 30; ++i)
+		for (int i = 0; i < static_cast<int>(std::size(scenarios)); ++i)
 		{
 			if (argc > 1 && std::atoi(argv[1]) != i + 1)
 				continue;
