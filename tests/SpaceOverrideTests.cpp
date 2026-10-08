@@ -21,6 +21,12 @@
 #include <functional>
 #include <picojson.h>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <Windows.h>
+#endif
+
 using namespace acquisition;
 
 static int CurrentScenario = 0;
@@ -1304,6 +1310,11 @@ static void Benchmark()
 
 int main(int argc, char **argv)
 {
+#ifdef _WIN32
+	// A crash must end the run with its exit code instead of waiting behind a modal error box on the desktop.
+	SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+	_set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
 	const std::function<void()> scenarios[] = { Scenario1, Scenario2, Scenario3, Scenario4, Scenario5, Scenario6, Scenario7,
 		Scenario8, Scenario9, Scenario10, Scenario11, Scenario12, Scenario13, Scenario14, Scenario15, Scenario16, Scenario17,
 		Scenario18, Scenario19, Scenario20, Scenario21 };
