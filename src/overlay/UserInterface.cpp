@@ -140,7 +140,7 @@ void UserInterface::Render(bool runningInOverlay)
 			{
 				std::string error = driverLink.lastError;
 				error.erase(error.find_last_not_of(" \t\r\n") + 1);
-				std::string text = "Waiting for the SpaceSync driver.";
+				std::string text = "Waiting for the SpaceLink driver.";
 				if (!error.empty())
 					text += " " + error;
 				statusText(orange, text);
@@ -323,7 +323,7 @@ void UserInterface::Render(bool runningInOverlay)
 			float footerHeight = ImGui::GetTextLineHeightWithSpacing() * (runningInOverlay ? 2.0f : 1.0f);
 			ImGui::SetCursorPos(ImVec2(10.0f, ImGui::GetWindowHeight() - footerHeight - style.WindowPadding.y));
 			ImGui::BeginChild("##bottom_line", ImVec2(ImGui::GetWindowWidth() - 20.0f, footerHeight), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-			ImGui::Text("SpaceSync v" SPACECAL_VERSION_STRING " - based on OpenVR-SpaceOverride by Nyabsi (Special thanks to tach/pushrax for OpenVR-SpaceCalibrator)");
+			ImGui::Text("SpaceLink v" SPACECAL_VERSION_STRING " - based on OpenVR-SpaceOverride by Nyabsi (Special thanks to tach/pushrax for OpenVR-SpaceCalibrator)");
 			if (runningInOverlay)
 			{
 				ImGui::Text("close VR overlay to use mouse");
