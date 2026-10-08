@@ -7,6 +7,7 @@
 #include "Version.h"
 
 #include <cmath>
+#include <random>
 
 namespace
 {
@@ -123,6 +124,21 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 	OpenLogFile();
 	LOG("OpenVR-SpaceOverride " SPACECAL_VERSION_STRING " loaded");
 
+	LARGE_INTEGER counter{};
+	FILETIME timestamp{};
+	QueryPerformanceCounter(&counter);
+	GetSystemTimeAsFileTime(&timestamp);
+	session = static_cast<uint64_t>(counter.QuadPart) ^ (static_cast<uint64_t>(GetCurrentProcessId()) << 32)
+		^ (static_cast<uint64_t>(timestamp.dwHighDateTime) << 32) ^ timestamp.dwLowDateTime;
+	try
+	{
+		std::random_device random;
+		session ^= (static_cast<uint64_t>(random()) << 32) ^ random();
+	}
+	catch (...) { LOG("Session entropy unavailable; using clock and process identity"); }
+	if (!session) session = 1;
+	drift.updatesSinceChange = 0;
+
 	memset(transforms, 0, vr::k_unMaxTrackedDeviceCount * sizeof(DeviceTransform));
 	memset(slamSync, 0, sizeof slamSync);
 
@@ -172,6 +188,7 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& cmd)
 {
 	ExclusiveLock lock(stateLock);
+	const auto previous = hmdTracker;
 	hmdTracker.enabled = cmd.enabled;
 	hmdTracker.native = cmd.native;
 	hmdTracker.slamFallback = cmd.slamFallback;
@@ -186,9 +203,25 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 	hmdTracker.calibrationScale = cmd.calibrationScale > 0.0 ? cmd.calibrationScale : 1.0;
 	hmdTracker.hmdScale = cmd.hmdScale > 0.0 ? cmd.hmdScale : 1.0;
 
+	auto sameRotation = [](const vr::HmdQuaternion_t &a, const vr::HmdQuaternion_t &b) {
+		return a.w == b.w && a.x == b.x && a.y == b.y && a.z == b.z;
+	};
+	auto sameTranslation = [](const vr::HmdVector3d_t &a, const vr::HmdVector3d_t &b) {
+		return a.v[0] == b.v[0] && a.v[1] == b.v[1] && a.v[2] == b.v[2];
+	};
+	if (previous.enabled != hmdTracker.enabled || previous.hmdID != hmdTracker.hmdID
+		|| previous.trackerID != hmdTracker.trackerID || previous.native != hmdTracker.native
+		|| !sameRotation(previous.offsetRotation, hmdTracker.offsetRotation)
+		|| !sameTranslation(previous.offsetTranslation, hmdTracker.offsetTranslation)
+		|| !sameRotation(previous.calibrationRotation, hmdTracker.calibrationRotation)
+		|| !sameTranslation(previous.calibrationTranslation, hmdTracker.calibrationTranslation)
+		|| previous.calibrationScale != hmdTracker.calibrationScale || previous.hmdScale != hmdTracker.hmdScale)
+		drift.updatesSinceChange = 0;
+
 	if (!cmd.enabled)
 	{
 		drift.valid = false;
+		drift.updatesSinceChange = 0;
 		drift.rotationFilter.reset();
 		drift.translationFilter.reset();
 		headFilter.reset();
@@ -196,6 +229,14 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 		trackerFilter.reset();
 		memset(slamSync, 0, sizeof slamSync);
 	}
+}
+
+protocol::DriftState ServerTrackedDeviceProvider::GetDriftState()
+{
+	SharedLock lock(stateLock);
+	return { session, drift.valid, drift.updatesSinceChange, drift.rotation, drift.translation, SlamToCorrectedScale(hmdTracker),
+		hmdTracker.enabled, hmdTracker.native, hmdTracker.offsetRotation, hmdTracker.offsetTranslation,
+		hmdTracker.calibrationRotation, hmdTracker.calibrationTranslation, hmdTracker.calibrationScale, hmdTracker.hmdScale };
 }
 
 void ServerTrackedDeviceProvider::SetSlamSync(const protocol::SetSlamSync& cmd)
@@ -244,6 +285,7 @@ void ServerTrackedDeviceProvider::UpdateDrift(DriftCorrection& drift, double sla
 	drift.rotation = drift.rotationFilter.filter(instRot, dt);
 	drift.translation = drift.translationFilter.filter(instTrans, dt);
 	drift.valid = true;
+	++drift.updatesSinceChange;
 }
 
 void ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose, double slamScale,

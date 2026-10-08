@@ -4,6 +4,7 @@
 
 #include <Windows.h>
 #include <string>
+#include <optional>
 
 #include "Protocol.h"
 
@@ -17,6 +18,7 @@ public:
 	bool Connected() const { return pipe != INVALID_HANDLE_VALUE; }
 	const std::string &LastError() const { return lastError; }
 	protocol::Response SendBlocking(const protocol::Request &request);
+	std::optional<protocol::DriftState> GetDriftState();
 
 	void Send(const protocol::Request &request);
 	protocol::Response Receive();

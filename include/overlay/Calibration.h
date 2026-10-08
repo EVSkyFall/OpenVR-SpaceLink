@@ -147,4 +147,5 @@ DriverLinkStatus GetDriverLinkStatus();
 void CancelCalibration();
 void SetAutoAcquire(bool enabled);
 void RemoveCalibration();
+void FlushSpaceMemory();
 void SetCalibrationNotificationHandler(vr::VRNotificationId (*show)(const char *, vr::EVRNotificationType), void (*remove)(vr::VRNotificationId));

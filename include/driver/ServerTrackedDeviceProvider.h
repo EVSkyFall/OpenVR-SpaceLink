@@ -43,11 +43,13 @@ public:
 	void SetHmdTracker(const protocol::SetHmdTracker &cmd);
 	void SetSlamSync(const protocol::SetSlamSync &cmd);
 	void SetOneEuro(const protocol::SetOneEuro &cmd);
+	protocol::DriftState GetDriftState();
 	bool HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose);
 
 private:
 	IPCServer server;
 	SRWLOCK stateLock = SRWLOCK_INIT;
+	uint64_t session = 0;
 
 	struct DeviceTransform
 	{
@@ -81,6 +83,7 @@ private:
 	struct DriftCorrection
 	{
 		bool valid = false;
+		uint64_t updatesSinceChange = 0;
 		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
 		vr::HmdVector3d_t translation = { 0, 0, 0 };
 

@@ -66,6 +66,38 @@ static bool WriteRegistryValue(const char *value, const std::string &text)
 	return result == ERROR_SUCCESS;
 }
 
+ReadResult LoadLastSpace(std::optional<spacememory::StoredAlignment> &stored)
+{
+	stored.reset();
+	std::string text;
+	const auto result = ReadRegistryValue("LastSpace", text);
+	if (result == ReadResult::Present)
+		stored = spacememory::Decode(text);
+	return result;
+}
+
+bool SaveLastSpace(const spacememory::StoredAlignment &stored)
+{
+	return WriteRegistryValue("LastSpace", spacememory::Encode(stored));
+}
+
+bool DeleteLastSpace()
+{
+	HKEY key;
+	LSTATUS result = RegOpenKeyExA(HKEY_CURRENT_USER_LOCAL_SETTINGS, RegistryKey, 0, KEY_SET_VALUE, &key);
+	if (result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND)
+		return true;
+	if (result == ERROR_SUCCESS)
+	{
+		result = RegDeleteValueA(key, "LastSpace");
+		RegCloseKey(key);
+	}
+	if (result == ERROR_FILE_NOT_FOUND || result == ERROR_SUCCESS)
+		return true;
+	LogRegistryResult("Deleting", "LastSpace", result);
+	return false;
+}
+
 void LoadProfile(CalibrationContext &ctx)
 {
 	if (!ProfileStorage.resolved)
