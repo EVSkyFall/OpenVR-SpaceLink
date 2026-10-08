@@ -9,8 +9,8 @@
 
       "strings": {
         "en_us": {
-          "name": "Space Override",
-          "description": "OpenVR Space Override Overlay"
+          "name": "SpaceSync",
+          "description": "OpenVR SpaceSync Overlay"
         }
       }
     }
