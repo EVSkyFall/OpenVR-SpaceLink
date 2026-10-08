@@ -59,7 +59,7 @@ static bool g_tracking_lost = false;
 static uint64_t g_tracking_lost_time = 0;
 
 #define APP_KEY     "Nyabsi.SpaceOverride"
-#define APP_NAME    "Space Override"
+#define APP_NAME    "SpaceSync"
 #define NOTIFY_KEY  "Nyabsi.SpaceOverrideNotifier"
 
 #define WIN_WIDTH   1200
@@ -103,7 +103,7 @@ static auto ActivateMultipleDrivers() -> void
 
 static auto CreateNotificationOverlay() -> void
 {
-    vr::VROverlay()->CreateOverlay(NOTIFY_KEY, "Space Override Notification", &g_notifyOverlayHandle);
+    vr::VROverlay()->CreateOverlay(NOTIFY_KEY, "SpaceSync Notification", &g_notifyOverlayHandle);
 
     vr::HmdMatrix34_t m = {
         1.0f, 0.0f, 0.0f,  0.0f,
