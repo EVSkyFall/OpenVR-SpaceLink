@@ -7,6 +7,8 @@
 namespace acquisition
 {
 
+struct SpeedLimits { double position = 0.4, rotation = 1.2; };
+
 enum class SampleEvent { Skipped, Accepted, TrackerPaused, HeadsetPaused, SegmentRestarted };
 
 class KeyframeStore
@@ -15,6 +17,7 @@ public:
 	bool Add(Sample sample, size_t capacity, bool eitherPose = false);
 	void Clear();
 	void SetCapacity(size_t capacity, bool eitherPose = false);
+	void Seed(const std::vector<Sample> &samples, size_t capacity);
 	bool ExpireBefore(double time, bool eitherPose = false);
 	const std::vector<Sample> &Samples() const { return samples; }
 	uint64_t Count() const { return accepted; }
@@ -32,7 +35,8 @@ class Sampler
 {
 public:
 	SampleEvent Observe(double time, const Pose &hmd, bool hmdValid, const Pose &tracker, bool trackerValid,
-		size_t capacity, bool referenceRotation = true, bool segmentBreaks = true, bool eitherPose = false);
+		size_t capacity, bool referenceRotation = true, bool segmentBreaks = true, bool eitherPose = false, SpeedLimits speed = {});
+	void Seed(const std::vector<Sample> &samples, size_t capacity);
 	void Clear();
 	bool ExpireBefore(double time, bool eitherPose = false) { return store.ExpireBefore(time, eitherPose); }
 	std::vector<Sample> Snapshot() const { return store.Samples(); }

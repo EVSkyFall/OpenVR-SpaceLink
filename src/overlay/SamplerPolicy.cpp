@@ -129,7 +129,7 @@ void KeyframeStore::Clear()
 }
 
 SampleEvent Sampler::Observe(double time, const Pose &hmd, bool hmdValid, const Pose &tracker, bool trackerValid,
-	size_t capacity, bool referenceRotation, bool segmentBreaks, bool eitherPose)
+	size_t capacity, bool referenceRotation, bool segmentBreaks, bool eitherPose, SpeedLimits speed)
 {
 	store.SetCapacity(capacity, eitherPose);
 	hmdValid = hmdValid && hmd.Finite();
@@ -164,16 +164,37 @@ SampleEvent Sampler::Observe(double time, const Pose &hmd, bool hmdValid, const 
 		return SampleEvent::Skipped;
 	if (dt > 0)
 	{
-		if (headPrevious && ((hmd.trans - oldHmd.trans).norm() / dt > 0.4
-			|| (referenceRotation && RotationAngle(hmd.rot * oldHmd.rot.transpose()) / dt > 1.2)))
+		if (headPrevious && ((hmd.trans - oldHmd.trans).norm() / dt > speed.position
+			|| (referenceRotation && RotationAngle(hmd.rot * oldHmd.rot.transpose()) / dt > speed.rotation)))
 			return SampleEvent::Skipped;
-		if (trackerPrevious && ((tracker.trans - oldTracker.trans).norm() / dt > 0.4
-			|| RotationAngle(tracker.rot * oldTracker.rot.transpose()) / dt > 1.2))
+		if (trackerPrevious && ((tracker.trans - oldTracker.trans).norm() / dt > speed.position
+			|| RotationAngle(tracker.rot * oldTracker.rot.transpose()) / dt > speed.rotation))
 			return SampleEvent::Skipped;
 	}
 	Sample sample{ hmd, tracker };
 	sample.time = time;
 	return store.Add(sample, capacity, eitherPose) ? SampleEvent::Accepted : SampleEvent::Skipped;
+}
+
+void KeyframeStore::Seed(const std::vector<Sample> &keyframes, size_t capacity)
+{
+	Clear();
+	samples = keyframes;
+	nearest.resize(samples.size(), INFINITY);
+	neighbours.resize(samples.size(), 0);
+	for (size_t i = 0; i < samples.size(); ++i)
+	{
+		accepted = std::max(accepted, samples[i].sequence);
+		RefreshNearest(i, false);
+	}
+	SetCapacity(capacity);
+}
+
+void Sampler::Seed(const std::vector<Sample> &samples, size_t capacity)
+{
+	Clear();
+	// These are already admitted raw keyframes; importing them must not apply a second novelty filter.
+	store.Seed(samples, capacity);
 }
 
 void Sampler::Clear()

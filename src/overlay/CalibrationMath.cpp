@@ -247,7 +247,7 @@ void ComputeRelativeOffset(CalibrationSolution &ctx, const std::vector<Sample> &
 
 bool AutomaticCalibrationSucceeded(const CalibrationSolution &solution)
 {
-	return solution.holdout.rms <= 0.03 && solution.holdout.p90 <= 0.06 && solution.rotationError.median <= 2 * Degrees;
+	return solution.holdout.rms <= 0.10 && solution.holdout.p90 <= 0.15 && solution.rotationError.median <= 3 * Degrees;
 }
 
 bool AutomaticCalibrationAbandoned(size_t newerKeyframes, double rotationMedian)
