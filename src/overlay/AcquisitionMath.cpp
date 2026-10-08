@@ -75,6 +75,8 @@ ErrorStats Statistics(std::vector<double> values)
 {
 	if (values.empty())
 		return { INFINITY, INFINITY, INFINITY };
+	if (std::any_of(values.begin(), values.end(), [](double value) { return std::isnan(value); }))
+		return { NAN, NAN, NAN };
 	std::sort(values.begin(), values.end());
 	double squares = 0;
 	for (double value : values)
@@ -332,13 +334,14 @@ CandidateCheck CheckHeadTracker(const std::vector<Sample> &samples, const SyncRe
 	check.rigidity = FitRigidity(samples, sync.rotation);
 	check.agreement = RotationAngle(check.rigidity.rotation * sync.rotation.transpose());
 	std::vector<Eigen::Vector3d> offsets;
-	std::vector<double> distances, heights;
+	std::vector<double> distances, heights, worldHeights;
 	for (const auto &sample : samples)
 	{
 		Eigen::Vector3d delta = sync.rotation * sample.target.trans + sync.translation - sample.ref.trans;
 		distances.push_back(delta.norm());
 		offsets.push_back(sample.ref.rot.transpose() * delta);
 		heights.push_back(offsets.back().y());
+		worldHeights.push_back(delta.y());
 	}
 	Eigen::Vector3d center;
 	for (int axis = 0; axis < 3; ++axis)
@@ -353,16 +356,18 @@ CandidateCheck CheckHeadTracker(const std::vector<Sample> &samples, const SyncRe
 		deviations.push_back((offset - center).norm());
 	check.distance = Statistics(std::move(distances));
 	check.vertical = Statistics(std::move(heights));
+	check.verticalWorld = Statistics(std::move(worldHeights));
 	check.spread = Statistics(std::move(deviations));
 	if (!sync.held) check.failure = "hand-sync";
 	else if (samples.size() < 8) check.failure = "keyframes";
 	else if (!check.rigidity.observable) check.failure = "rotation-deltas";
-	else if (check.rigidity.error.median > 5 * Degrees) check.failure = "rotation-median";
-	else if (check.rigidity.error.p90 > 12 * Degrees) check.failure = "rotation-p90";
-	else if (check.agreement > 15 * Degrees) check.failure = "sync-rotation";
-	else if (check.distance.median > 0.35) check.failure = "distance";
-	else if (check.spread.p90 > 0.15) check.failure = "offset-spread";
-	else if (check.vertical.median < -0.18) check.failure = "vertical";
+	else if (!(check.rigidity.error.median <= 5 * Degrees)) check.failure = "rotation-median";
+	else if (!(check.rigidity.error.p90 <= 12 * Degrees)) check.failure = "rotation-p90";
+	else if (!(check.agreement <= 15 * Degrees)) check.failure = "sync-rotation";
+	else if (!(check.distance.median <= 0.35)) check.failure = "distance";
+	else if (!(check.spread.p90 <= 0.15)) check.failure = "offset-spread";
+	else if (!(check.vertical.median >= -0.18)) check.failure = "vertical";
+	else if (!(check.verticalWorld.median >= -0.18)) check.failure = "vertical-world";
 	return check;
 }
 
