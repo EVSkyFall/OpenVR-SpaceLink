@@ -143,9 +143,12 @@ static void RefreshDevices()
 		if (deviceClass == vr::TrackedDeviceClass_Invalid)
 			continue;
 		auto role = static_cast<vr::ETrackedControllerRole>(vr::VRSystem()->GetInt32TrackedDeviceProperty(id, vr::Prop_ControllerRoleHint_Int32));
+		char controllerType[vr::k_unMaxPropertyStringSize] = {};
+		vr::ETrackedPropertyError error;
+		vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_ControllerType_String, controllerType, sizeof(controllerType), &error);
 		Devices.push_back({ id, deviceClass, role,
 			GetDeviceSerial(id), GetDeviceTrackingSystem(id), CalCtx.devicePoses[id].bDeviceIsConnected,
-			CalCtx.devicePoses[id].bPoseIsValid, GetLighthouseModelScale(id) });
+			CalCtx.devicePoses[id].bPoseIsValid, GetLighthouseModelScale(id), error == vr::TrackedProp_Success ? controllerType : "" });
 	}
 	CalCtx.targetID = ResolveSerial(Devices, CalCtx.trackerSerial);
 	if (Attempt)
@@ -341,7 +344,8 @@ static void LogSearch(const acquisition::Evaluation &evaluation)
 	for (const auto &candidate : evaluation.candidates)
 		overlaylog::Write("candidate serial=", std::quoted(candidate.serial), " keyframes=", candidate.keyframes,
 			" rigidity_deg=", candidate.check.rigidity.error.median / acquisition::Degrees,
-			" distance_m=", candidate.check.distance.median, " vertical_m=", candidate.check.vertical.median, " result=", candidate.check.failure);
+			" distance_m=", candidate.check.distance.median, " vertical_m=", candidate.check.vertical.median,
+			" vertical_world_m=", candidate.check.verticalWorld.median, " result=", candidate.check.failure);
 }
 
 static void TickAcquisition(double time, const ObservationSpace &observationSpace)
@@ -587,7 +591,8 @@ static void LogDeviceAndAcquisitionChanges()
 		overlaylog::Write("devices count=", Devices.size());
 		for (const auto &d : Devices)
 			overlaylog::Write("device index=", d.id, " class=", d.deviceClass, " role_hint=", d.role,
-				" serial=", std::quoted(d.serial), " system=", std::quoted(d.trackingSystem), " connected=", d.connected, " pose_valid=", d.poseValid);
+				" serial=", std::quoted(d.serial), " system=", std::quoted(d.trackingSystem), " controller_type=", std::quoted(d.controllerType),
+				" connected=", d.connected, " pose_valid=", d.poseValid);
 		previous = Devices;
 	}
 	auto state = DescribeAcquisition(CalCtx, Attempt ? &*Attempt : nullptr, ProfileReadSucceeded(), SettingsReadSucceeded(), Acquisition.HasHands(), AcquisitionResult.handPairs);

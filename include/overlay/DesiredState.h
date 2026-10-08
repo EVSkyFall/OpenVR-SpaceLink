@@ -13,6 +13,7 @@ struct DeviceSnapshot
 	std::string serial, trackingSystem;
 	bool connected = false, poseValid = false;
 	double modelScale = 1.0;
+	std::string controllerType;
 };
 
 uint32_t ResolveSerial(const std::vector<DeviceSnapshot> &devices, const std::string &serial);
