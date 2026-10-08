@@ -203,17 +203,6 @@ void UserInterface::Render(bool runningInOverlay)
 				}
 			}
 
-			bool autoAcquire = CalCtx.autoAcquire;
-			if (ImGui::Checkbox("Find head tracker automatically", &autoAcquire))
-				SetAutoAcquire(autoAcquire);
-			if (ImGui::BeginItemTooltip())
-			{
-				ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
-				ImGui::TextUnformatted("Uses hand tracking and the lighthouse controllers in your hands to find the tracker on your headset, then calibrates it without a button. Turn this off to stop it.");
-				ImGui::PopTextWrapPos();
-				ImGui::EndTooltip();
-			}
-
 			ImGui::Text("");
 
 			if (CalCtx.state == CalibrationState::None)
@@ -317,7 +306,15 @@ void UserInterface::Render(bool runningInOverlay)
 					CalCtx.state = CalibrationState::None;
 				}
 			}
-			else if (acquire.state != AcquireState::Calibrating)
+			else if (acquire.state == AcquireState::Calibrating)
+			{
+				if (ImGui::Button("Calibrate", ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetTextLineHeight() * 2)))
+				{
+					ImGui::OpenPopup("Calibration Progress");
+					StartCalibration();
+				}
+			}
+			else
 			{
 				if (ImGui::Button("Calibration in progress...", ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetTextLineHeight() * 2)))
 					ImGui::OpenPopup("Calibration Progress");
@@ -454,6 +451,18 @@ void UserInterface::Render(bool runningInOverlay)
 
 		if (ImGui::BeginTabItem("Settings"))
 		{
+			bool autoAcquire = CalCtx.autoAcquire;
+			if (ImGui::Checkbox("Find head tracker automatically", &autoAcquire))
+				SetAutoAcquire(autoAcquire);
+			if (ImGui::BeginItemTooltip())
+			{
+				ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
+				ImGui::TextUnformatted("Uses hand tracking and the lighthouse controllers in your hands to find the tracker on your headset, then calibrates it without a button. Turn this off to stop it.");
+				ImGui::PopTextWrapPos();
+				ImGui::EndTooltip();
+			}
+			ImGui::Spacing();
+
 			ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "NOTE: All settings below require re-calibration to be applied");
 			ImGui::Spacing();
 			ImGui::Text("Tip: hover over the settings to see additional information.");
