@@ -36,9 +36,16 @@ struct Restoration
 	Alignment alignment;
 };
 
+struct RestorePreparation
+{
+	bool consumeLink, claimSession, logProfilePending;
+};
+
 Alignment Fold(const protocol::DriftState &state);
 std::optional<StoredAlignment> Capture(const protocol::DriftState &state, const CalibrationContext &profile);
 Restoration Restore(const std::optional<StoredAlignment> &stored, const CalibrationContext &profile, uint64_t currentSession);
+RestorePreparation PrepareRestore(bool profileReadSucceeded, uint64_t session, uint64_t lastSession, uint64_t profilePendingSession);
+bool ShouldPoll(bool linkPending, bool connected, double now, double lastPoll);
 const char *ResultName(RestoreResult result);
 std::string Encode(const StoredAlignment &stored);
 std::optional<StoredAlignment> Decode(const std::string &json);

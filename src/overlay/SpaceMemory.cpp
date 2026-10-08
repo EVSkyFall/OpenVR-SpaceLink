@@ -40,27 +40,6 @@ static bool Finite(const StoredAlignment &stored)
 	return stored.alignment.rotation.allFinite() && stored.alignment.translation.allFinite() && Finite(stored.basis);
 }
 
-Alignment Fold(const protocol::DriftState &state)
-{
-	const Eigen::Quaterniond inverse = Quaternion(state.rotation).inverse();
-	const Eigen::Quaterniond rotation = inverse * Quaternion(state.calibrationRotation);
-	return { rotation.toRotationMatrix().eulerAngles(2, 1, 0) * 180.0 / EIGEN_PI,
-		(inverse * (Vector(state.calibrationTranslation) - Vector(state.translation))) * 100.0 };
-}
-
-std::optional<StoredAlignment> Capture(const protocol::DriftState &state, const CalibrationContext &profile)
-{
-	if (!state.valid || !state.enabled || state.native || state.updatesSinceChange < 120 || !Bound(profile) || !state.session)
-		return std::nullopt;
-	Basis basis{ state.calibrationRotation, state.offsetRotation, state.calibrationTranslation, state.offsetTranslation,
-		state.calibrationScale, state.hmdScale, profile.trackerSerial };
-	if (!Finite(basis) || !Quaternion(state.rotation).coeffs().allFinite() || !Vector(state.translation).allFinite()
-		|| !std::isfinite(state.slamScale) || !Finite(ProfileBasis(profile)))
-		return std::nullopt;
-	StoredAlignment stored{ Fold(state), basis, state.session };
-	return Finite(stored) ? std::optional<StoredAlignment>(stored) : std::nullopt;
-}
-
 static bool Close(const vr::HmdQuaternion_t &a, const vr::HmdQuaternion_t &b)
 {
 	const auto qa = Quaternion(a).coeffs().eval(), qb = Quaternion(b).coeffs().eval();
@@ -72,6 +51,46 @@ static bool Close(const vr::HmdVector3d_t &a, const vr::HmdVector3d_t &b)
 	return (Vector(a) - Vector(b)).cwiseAbs().maxCoeff() <= 1e-6;
 }
 
+static bool Close(const Basis &a, const Basis &b)
+{
+	return a.trackerSerial == b.trackerSerial
+		&& Close(a.calibrationRotation, b.calibrationRotation) && Close(a.calibrationTranslation, b.calibrationTranslation)
+		&& Close(a.offsetRotation, b.offsetRotation) && Close(a.offsetTranslation, b.offsetTranslation)
+		&& std::abs(a.calibrationScale - b.calibrationScale) <= 1e-6 && std::abs(a.hmdScale - b.hmdScale) <= 1e-6;
+}
+
+Alignment Fold(const protocol::DriftState &state)
+{
+	const Eigen::Quaterniond inverse = Quaternion(state.rotation).inverse();
+	const Eigen::Quaterniond rotation = inverse * Quaternion(state.calibrationRotation);
+	Eigen::Vector3d angles = rotation.toRotationMatrix().eulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
+	Eigen::Vector3d alternate(angles.x() + 180.0, 180.0 - angles.y(), angles.z() + 180.0);
+	auto wrap = [](double angle) {
+		double wrapped = std::remainder(angle, 360.0);
+		return wrapped == -180.0 ? 180.0 : wrapped;
+	};
+	angles = angles.unaryExpr(wrap).eval();
+	alternate = alternate.unaryExpr(wrap).eval();
+	if (std::abs(alternate.x()) + std::abs(alternate.z()) < std::abs(angles.x()) + std::abs(angles.z()))
+		angles = alternate;
+	return { angles,
+		(inverse * (Vector(state.calibrationTranslation) - Vector(state.translation))) * 100.0 };
+}
+
+std::optional<StoredAlignment> Capture(const protocol::DriftState &state, const CalibrationContext &profile)
+{
+	if (!state.valid || !state.enabled || state.native || state.updatesSinceChange < 120 || !Bound(profile) || !state.session)
+		return std::nullopt;
+	Basis basis{ state.calibrationRotation, state.offsetRotation, state.calibrationTranslation, state.offsetTranslation,
+		state.calibrationScale, state.hmdScale, profile.trackerSerial };
+	const auto expected = ProfileBasis(profile);
+	if (!Finite(basis) || !Quaternion(state.rotation).coeffs().allFinite() || !Vector(state.translation).allFinite()
+		|| !std::isfinite(state.slamScale) || !Finite(expected) || !Close(basis, expected))
+		return std::nullopt;
+	StoredAlignment stored{ Fold(state), basis, state.session };
+	return Finite(stored) ? std::optional<StoredAlignment>(stored) : std::nullopt;
+}
+
 Restoration Restore(const std::optional<StoredAlignment> &stored, const CalibrationContext &profile, uint64_t currentSession)
 {
 	if (!stored || !stored->session || !Finite(*stored))
@@ -79,13 +98,21 @@ Restoration Restore(const std::optional<StoredAlignment> &stored, const Calibrat
 	if (!Bound(profile))
 		return { RestoreResult::NotBound, stored->alignment };
 	const auto basis = ProfileBasis(profile);
-	const auto &saved = stored->basis;
-	if (!Finite(basis) || saved.trackerSerial != basis.trackerSerial
-		|| !Close(saved.calibrationRotation, basis.calibrationRotation) || !Close(saved.calibrationTranslation, basis.calibrationTranslation)
-		|| !Close(saved.offsetRotation, basis.offsetRotation) || !Close(saved.offsetTranslation, basis.offsetTranslation)
-		|| std::abs(saved.calibrationScale - basis.calibrationScale) > 1e-6 || std::abs(saved.hmdScale - basis.hmdScale) > 1e-6)
+	if (!Finite(basis) || !Close(stored->basis, basis))
 		return { RestoreResult::BasisMismatch, stored->alignment };
 	return { stored->session == currentSession ? RestoreResult::SameSession : RestoreResult::Applied, stored->alignment };
+}
+
+RestorePreparation PrepareRestore(bool profileReadSucceeded, uint64_t session, uint64_t lastSession, uint64_t profilePendingSession)
+{
+	if (!profileReadSucceeded)
+		return { false, false, session && session != profilePendingSession };
+	return { true, session && session != lastSession, false };
+}
+
+bool ShouldPoll(bool linkPending, bool connected, double now, double lastPoll)
+{
+	return !linkPending && connected && !(now - lastPoll < 1.0);
 }
 
 const char *ResultName(RestoreResult result)
