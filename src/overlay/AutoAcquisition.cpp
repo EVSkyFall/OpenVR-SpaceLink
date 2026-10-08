@@ -5,29 +5,41 @@
 #include <algorithm>
 #include <map>
 #include <set>
+#include <string_view>
 
 namespace acquisition
 {
 
-Evaluation Evaluate(const std::vector<Hypothesis> &hypotheses)
+Evaluation Evaluate(const std::vector<Hypothesis> &hypotheses, bool diagnostics)
 {
 	Evaluation evaluation;
+	evaluation.diagnostics = diagnostics;
 	for (const auto &hypothesis : hypotheses)
 	{
-		SyncResult sync = CombineHandPairs(hypothesis.pairs);
+		std::vector<SyncResult> individual;
+		SyncResult sync = CombineHandPairs(hypothesis.pairs, diagnostics ? &individual : nullptr);
 		evaluation.handPairs += sync.handPairs;
-		if (!sync.held)
+		if (diagnostics)
+			for (size_t i = 0; i < hypothesis.pairs.size(); ++i)
+			{
+				const auto &pair = hypothesis.pairs[i];
+				evaluation.pairs.push_back({ pair.handSerial, pair.controllerSerial, pair.samples.size(), individual[i] });
+			}
+		if (!sync.held && !diagnostics)
 			continue;
 		for (const auto &candidate : hypothesis.candidates)
 		{
-			RigidityResult rigidity;
-			if (IsHeadTracker(candidate.samples, sync, &rigidity))
+			auto check = CheckHeadTracker(candidate.samples, sync);
+			if (std::string_view(check.failure) == "pass")
 			{
 				auto passed = candidate.candidate;
-				passed.rotation = rigidity.rotation;
+				passed.rotation = check.rigidity.rotation;
 				passed.heightCertain = sync.heightCertain;
+				passed.samples = candidate.samples;
 				evaluation.passing.push_back(std::move(passed));
 			}
+			if (diagnostics)
+				evaluation.candidates.push_back({ candidate.candidate.serial, candidate.samples.size(), check });
 		}
 	}
 	return evaluation;
@@ -35,14 +47,14 @@ Evaluation Evaluate(const std::vector<Hypothesis> &hypotheses)
 
 std::optional<CandidateEvidence> Confirmation::Update(const Evaluation &evaluation)
 {
-	if (evaluation.passing.size() != 1 || !evaluation.passing.front().heightCertain)
+	if (evaluation.passing.size() != 1)
 	{
 		Reset();
 		return {};
 	}
 	const auto &candidate = evaluation.passing.front();
 	if (previous && previous->serial == candidate.serial && previous->system == candidate.system
-		&& candidate.count >= previous->count && candidate.count - previous->count >= 20)
+		&& candidate.count >= previous->count && candidate.count - previous->count >= 5)
 		return candidate;
 	if (!previous || previous->serial != candidate.serial || previous->system != candidate.system || candidate.count < previous->count)
 		previous = candidate;
@@ -147,13 +159,13 @@ void AutoAcquisition::Observe(double time, const vr::TrackedDevicePose_t *poses)
 		const auto &s = poses[pair.hand];
 		const auto &l = poses[pair.controller];
 		pair.sampler.Observe(time, Pose(s.mDeviceToAbsoluteTracking), s.bPoseIsValid,
-			Pose(l.mDeviceToAbsoluteTracking), l.bPoseIsValid, 400, false, false);
+			Pose(l.mDeviceToAbsoluteTracking), l.bPoseIsValid, 400, false, false, false, { 1.0, 3.0 });
 	}
 	for (auto &candidate : candidates)
 	{
 		const auto &tracker = poses[candidate.candidate.id];
 		candidate.sampler.Observe(time, head, headValid, Pose(tracker.mDeviceToAbsoluteTracking),
-			tracker.bPoseIsValid, 400, true, false, true);
+			tracker.bPoseIsValid, 400, true, false, true, { 0.6, 2.0 });
 	}
 }
 
@@ -164,7 +176,7 @@ std::vector<Hypothesis> AutoAcquisition::Snapshot() const
 	{
 		auto &hypothesis = grouped[pair.system];
 		hypothesis.system = pair.system;
-		hypothesis.pairs.push_back({ pair.hand, pair.controller, pair.sampler.Store().Samples() });
+		hypothesis.pairs.push_back({ pair.hand, pair.controller, pair.sampler.Store().Samples(), pair.handSerial, pair.controllerSerial });
 	}
 	for (const auto &store : candidates)
 	{

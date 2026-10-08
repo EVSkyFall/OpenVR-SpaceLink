@@ -8,6 +8,8 @@
 #include "DesiredState.h"
 #include "ProfileCodec.h"
 #include "ManualDetection.h"
+#include "OverlayLog.h"
+#include <fstream>
 #include <limits>
 
 #include <chrono>
@@ -233,10 +235,10 @@ static void Scenario5()
 	Check(!confirmation.Update(evaluation), "first pass must not confirm");
 	for (int i = 0; i < 8; ++i)
 		Check(!confirmation.Update(evaluation), "repeated buffer evaluation is not grown evidence");
-	evaluation.passing.front().count += 19;
-	Check(!confirmation.Update(evaluation), "19 new keyframes are insufficient");
+	evaluation.passing.front().count += 4;
+	Check(!confirmation.Update(evaluation), "4 new keyframes are insufficient");
 	++evaluation.passing.front().count;
-	Check(confirmation.Update(evaluation).has_value(), "20 new keyframes must confirm");
+	Check(confirmation.Update(evaluation).has_value(), "5 new keyframes must confirm");
 	auto ambiguous = Detect({ HeadSamples(0.08, false, false), HeadSamples(0.12, false, false) });
 	Confirmation fresh;
 	auto single = evaluation;
@@ -248,9 +250,9 @@ static void Scenario5()
 	Check(!fresh.Update(single), "ambiguity must reset earlier single-candidate evidence");
 	Confirmation uncertain;
 	single.passing.front().heightCertain = false;
-	Check(!uncertain.Update(single), "uncertain height must remain unconfirmed");
+	Check(!uncertain.Update(single), "uncertain height still needs a second pass");
 	single.passing.front().count += 20;
-	Check(!uncertain.Update(single), "new evidence cannot confirm until height is observable");
+	Check(uncertain.Update(single).has_value(), "grown evidence must confirm without height certainty");
 	Check(!IsHeadTracker(HeadSamples(0.08), [&] { auto s = KnownSync(); s.rotation = Rotation(0, 80 * Degrees); return s; }()), "sync rotation disagreement must reject");
 }
 
@@ -292,13 +294,13 @@ static void Scenario7()
 	}
 	auto uncertainSync = FitHandPairs({ MakePair(0, 300, false, true, false) });
 	Check(uncertainSync.held && !uncertainSync.heightCertain, "height-uncertain fixture must come from yaw-only hand motion");
-	uncertainSync.translation.y() = SyncTranslation.y() + 0.3;
-	Check(IsHeadTracker(pitching, uncertainSync), "uncertain world height must not become a false horizontal distance while pitching");
+	uncertainSync.translation.y() = SyncTranslation.y() + 0.03;
+	Check(IsHeadTracker(pitching, uncertainSync), "the prior-bounded vertical estimate must be used as is while pitching");
 	for (size_t i = 0; i < pitching.size(); i += 4)
 		pitching[i].target.trans += SyncRotation.transpose() * pitching[i].ref.rot * Eigen::Vector3d(0.17, 0, 0);
 	Check(!IsHeadTracker(pitching, uncertainSync), "uncertain-height spread must still reject lateral looseness");
 	uncertainSync.translation.y() += 0.6;
-	Check(!IsHeadTracker(HeadSamples(0.08), uncertainSync), "uncertain world vertical distance must enforce its bound");
+	Check(!IsHeadTracker(HeadSamples(0.08), uncertainSync), "uncertain height must still enforce full 3D proximity");
 }
 
 static Pose LatencyController(double time)
@@ -427,17 +429,17 @@ static void Scenario10()
 	reservoir.SetCapacity(5);
 	Check(reservoir.Samples().size() == 5, "a smaller calibration capacity must take effect without a new accepted frame");
 	CalibrationSolution quality;
-	quality.holdout = { 0, 0.06, 0.03 };
-	quality.rotationError.median = 2 * Degrees;
+	quality.holdout = { 0, 0.15, 0.10 };
+	quality.rotationError.median = 3 * Degrees;
 	Check(AutomaticCalibrationSucceeded(quality), "automatic success thresholds are inclusive");
-	quality.holdout.rms = std::nextafter(0.03, 1.0);
-	Check(!AutomaticCalibrationSucceeded(quality), "automatic RMS above 3 cm must fail");
-	quality.holdout.rms = 0.03;
-	quality.holdout.p90 = std::nextafter(0.06, 1.0);
-	Check(!AutomaticCalibrationSucceeded(quality), "automatic p90 above 6 cm must fail");
-	quality.holdout.p90 = 0.06;
-	quality.rotationError.median = std::nextafter(2 * Degrees, 1.0);
-	Check(!AutomaticCalibrationSucceeded(quality), "automatic rotation median above 2 degrees must fail");
+	quality.holdout.rms = std::nextafter(0.10, 1.0);
+	Check(!AutomaticCalibrationSucceeded(quality), "automatic RMS above 10 cm must fail");
+	quality.holdout.rms = 0.10;
+	quality.holdout.p90 = std::nextafter(0.15, 1.0);
+	Check(!AutomaticCalibrationSucceeded(quality), "automatic p90 above 15 cm must fail");
+	quality.holdout.p90 = 0.15;
+	quality.rotationError.median = std::nextafter(3 * Degrees, 1.0);
+	Check(!AutomaticCalibrationSucceeded(quality), "automatic rotation median above 3 degrees must fail");
 	Check(!AutomaticCalibrationAbandoned(19, 9 * Degrees) && !AutomaticCalibrationAbandoned(20, 8 * Degrees)
 		&& AutomaticCalibrationAbandoned(20, std::nextafter(8 * Degrees, 1.0)), "automatic abandon requires 20 newer frames and strictly more than 8 degrees");
 }
@@ -921,6 +923,249 @@ static void Scenario13()
 		"invalid stored profile must not retain a binding or relative offset");
 }
 
+static HandPair RoughPair(size_t count = 12, double spread = 0.101)
+{
+	HandPair pair;
+	for (size_t i = 0; i < count; ++i)
+	{
+		Sample sample;
+		double angle = 2 * Pi * i / count;
+		sample.target.trans = Eigen::Vector3d(spread * std::cos(angle), 1, spread * std::sin(angle));
+		sample.ref.trans = SyncRotation * sample.target.trans + SyncTranslation;
+		sample.sequence = i + 1;
+		pair.samples.push_back(sample);
+	}
+	return pair;
+}
+
+static std::vector<Sample> YawHead(const std::vector<double> &angles)
+{
+	std::vector<Sample> samples;
+	for (double angle : angles)
+	{
+		Sample sample;
+		sample.ref.rot = Rotation(0, angle);
+		sample.ref.trans = Eigen::Vector3d(0, 1.65, 0);
+		sample.target.rot = SyncRotation.transpose() * sample.ref.rot;
+		sample.target.trans = SyncRotation.transpose() * (sample.ref.trans + Eigen::Vector3d(0, 0.08, 0) - SyncTranslation);
+		sample.sequence = samples.size() + 1;
+		samples.push_back(sample);
+	}
+	return samples;
+}
+
+static void Scenario14()
+{
+	Check(FitHandPairs({ RoughPair() }).held, "12 keyframes and 10.1 cm spread must hold");
+	Check(!FitHandPairs({ RoughPair(11) }).held, "11 hand keyframes must not hold");
+	Check(!FitHandPairs({ RoughPair(12, 0.099) }).held, "9.9 cm spread must not hold");
+	auto pair = RoughPair();
+	for (size_t k : { 0, 5, 10 }) pair.samples[k].ref.trans.x() += k == 10 ? 0.149 : 0.079;
+	Check(FitHandPairs({ pair }).held, "7.9 cm median and 14.9 cm p90 must hold");
+	pair.samples[0].ref.trans.x() += 0.002;
+	pair.samples[5].ref.trans.x() += 0.002;
+	Check(!FitHandPairs({ pair }).held, "8.1 cm hand median must reject");
+	pair.samples[0].ref.trans.x() -= 0.002;
+	pair.samples[5].ref.trans.x() -= 0.002;
+	pair.samples[10].ref.trans.x() += 0.002;
+	Check(!FitHandPairs({ pair }).held, "15.1 cm hand p90 must reject");
+
+	auto yaw = YawHead({ 0, 0, 0, 0, 0, 0.1501, 0.1501, 0.075 });
+	auto sync = KnownSync(); sync.heightCertain = false;
+	auto check = CheckHeadTracker(yaw, sync);
+	Check(check.rigidity.deltas == 10 && IsHeadTracker(yaw, sync), "8 frames and 10 deltas must detect yaw-only head at 60 degree sync");
+	yaw.pop_back();
+	Check(!FitRigidity(yaw).observable, "7 candidate keyframes must reject even with 10 deltas");
+	Check(!FitRigidity(YawHead({ 0, 0, 0, 0.16, 0.16, 0.16, 0.08, 0.08 })).observable, "9 valid deltas must reject");
+	Check(!FitRigidity(YawHead({ 0, 0, 0, 0, 0, 0.1499, 0.1499, 0.075 })).observable, "rotations below 0.15 rad must not form deltas");
+	auto mismatched = YawHead({ 0, 0, 0, 0, 0, 0.16, 0.16, 0.08 });
+	for (size_t i = 5; i < 7; ++i) mismatched[i].target.rot = SyncRotation.transpose() * Rotation(0, 0.14);
+	Check(!FitRigidity(mismatched).observable, "both rotations must reach the delta threshold");
+	for (double angle : { 4.5, 5.5, 11.0, 13.0 })
+	{
+		auto noisy = HeadSamples(0.08);
+		for (size_t i = 0; i < noisy.size(); ++i)
+			if (angle < 6 || i % 5 == 0)
+				noisy[i].target.rot = noisy[i].target.rot * Rotation((i % 2 ? -1 : 1) * angle * Degrees, 0);
+		Check(IsHeadTracker(noisy, sync) == (angle == 4.5 || angle == 11.0), "rigidity median 5 deg and p90 12 deg must bound rough detection");
+	}
+	for (double angle : { 14.0, 16.0 })
+	{
+		auto otherSync = sync; otherSync.rotation = Rotation(0, (60 + angle) * Degrees);
+		auto head = HeadSamples(0.08);
+		for (auto &sample : head)
+			sample.target.trans = otherSync.rotation.transpose() * (sample.ref.trans + sample.ref.rot * Eigen::Vector3d(0, 0.08, 0) - otherSync.translation);
+		Check(IsHeadTracker(head, otherSync) == (angle == 14), "sync rotation agreement must allow 14 deg and reject 16 deg");
+	}
+	Check(IsHeadTracker(HeadSamples(0.349), sync) && !IsHeadTracker(HeadSamples(0.351), sync), "proximity median must use 35 cm");
+	Check(IsHeadTracker(HeadSamples(0.179, true, false), sync) && !IsHeadTracker(HeadSamples(0.181, true, false), sync), "vertical prior must use minus 18 cm even with uncertain height");
+	for (double spread : { 0.149, 0.151 })
+	{
+		auto head = HeadSamples(0.08);
+		for (size_t i = 0; i < head.size(); i += 4)
+			head[i].target.trans += SyncRotation.transpose() * head[i].ref.rot * Eigen::Vector3d(spread, 0, 0);
+		Check(IsHeadTracker(head, sync) == (spread < 0.15), "local offset spread p90 must use 15 cm");
+	}
+	Hypothesis hypothesis;
+	hypothesis.pairs = { RoughPair() };
+	hypothesis.candidates.push_back({ { 5, "head", "system-Y", 8 }, YawHead({ 0, 0, 0, 0, 0, 0.16, 0.16, 0.08 }) });
+	auto diagnostic = Evaluate({ hypothesis }, true);
+	Check(diagnostic.pairs.size() == 1 && diagnostic.candidates.size() == 1 && diagnostic.passing.size() == 1,
+		"diagnostics must report each pair and candidate while preserving decisions");
+	hypothesis.pairs.front().samples.clear();
+	diagnostic = Evaluate({ hypothesis }, true);
+	Check(diagnostic.candidates.size() == 1 && std::string(diagnostic.candidates.front().check.failure) == "hand-sync",
+		"candidate diagnostic must include the first failure before hand sync holds");
+}
+
+static size_t SpeedFrames(uint32_t id, double position, double rotation, bool pair)
+{
+	AutoAcquisition acquisition;
+	acquisition.Refresh(Devices());
+	vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
+	for (const auto &device : Devices()) poses[device.id] = TrackedPose(Pose{});
+	acquisition.Observe(0, poses);
+	Pose moved;
+	moved.trans.x() = position * 0.05;
+	moved.rot = Rotation(rotation * 0.05, 0);
+	poses[id] = TrackedPose(moved);
+	acquisition.Observe(0.05, poses);
+	auto snapshot = acquisition.Snapshot();
+	return pair ? snapshot.front().pairs.front().samples.size() : snapshot.front().candidates.front().samples.size();
+}
+
+static void Scenario15()
+{
+	Check(SpeedFrames(1, 0.99, 8, true) == 1 && SpeedFrames(1, 1.01, 0, true) == 0, "hand position gate must be 1 m/s and ignore hand rotation");
+	Check(SpeedFrames(3, 0.99, 2.99, true) == 1 && SpeedFrames(3, 1.01, 0, true) == 0 && SpeedFrames(3, 0, 3.01, true) == 0,
+		"controller gates must be 1 m/s and 3 rad/s");
+	for (uint32_t id : { 0, 5 })
+		Check(SpeedFrames(id, 0.59, 1.99, false) == 1 && SpeedFrames(id, 0.61, 0, false) == 0 && SpeedFrames(id, 0, 2.01, false) == 0,
+			"HMD and tracker acquisition gates must be 0.6 m/s and 2 rad/s");
+	AutoAcquisition acquisition;
+	auto devices = Devices();
+	devices[5].serial = "head";
+	devices.push_back({ 8, vr::TrackedDeviceClass_GenericTracker, vr::TrackedControllerRole_Invalid, "foot", "system-Y", true, true });
+	acquisition.Refresh(devices);
+	std::mt19937 random(20261008);
+	std::normal_distribution<double> noise(0, 1);
+	double confirmedAt = -1;
+	bool twoHeld = false;
+	for (int tick = 0; tick <= 300; ++tick)
+	{
+		double time = tick * 0.05;
+		vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
+		for (int hand = 0; hand < 2; ++hand)
+		{
+			Pose controller = Controller(time, hand, true), delayed = Controller(time - 0.060, hand, true), reference;
+			Eigen::Vector3d offset(0.03 + hand * 0.02, 0.025, -0.04);
+			reference.trans = SyncRotation * (delayed.trans + delayed.rot * offset) + SyncTranslation;
+			for (int axis = 0; axis < 3; ++axis)
+			{
+				reference.trans(axis) += 0.003 * noise(random);
+				controller.trans(axis) += 0.001 * noise(random);
+			}
+			poses[1 + hand] = TrackedPose(reference);
+			poses[3 + hand] = TrackedPose(controller);
+		}
+		Pose head, tracker, chest, foot;
+		head.rot = Rotation(0.38 * std::sin(time * 0.8), 0.5 * std::sin(time * 0.6), 0.15 * std::sin(time * 0.4));
+		head.trans = Eigen::Vector3d(0.1 * std::sin(time * 0.4), 1.65 + 0.02 * std::sin(time), 0.1 * std::cos(time * 0.3));
+		tracker.rot = SyncRotation.transpose() * head.rot * Rotation(0.12, -0.24, 0.15);
+		tracker.trans = SyncRotation.transpose() * (head.trans + head.rot * Eigen::Vector3d(0, 0.08, 0) - SyncTranslation);
+		chest.rot = SyncRotation.transpose() * Rotation(0.1 * std::sin(time * 0.3), 0.2 * std::sin(time * 0.4));
+		chest.trans = SyncRotation.transpose() * (head.trans + Eigen::Vector3d(0, -0.27, 0) - SyncTranslation);
+		foot.trans = SyncRotation.transpose() * (Eigen::Vector3d(0.1, 0.05, 0.1) - SyncTranslation);
+		for (int axis = 0; axis < 3; ++axis)
+		{
+			head.trans(axis) += 0.001 * noise(random);
+			tracker.trans(axis) += 0.001 * noise(random);
+		}
+		poses[0] = TrackedPose(head); poses[5] = TrackedPose(tracker);
+		poses[6] = TrackedPose(chest); poses[8] = TrackedPose(foot);
+		acquisition.Observe(time, poses);
+		if (tick % 20 == 0)
+		{
+			auto evaluation = Evaluate(acquisition.Snapshot());
+			twoHeld = twoHeld || evaluation.handPairs == 2;
+			for (const auto &passing : evaluation.passing)
+				Check(passing.serial == "head", "natural motion must never pass the chest or foot");
+			auto confirmed = acquisition.Confirm(evaluation, acquisition.Epoch());
+			if (confirmed)
+			{
+				Check(confirmed->serial == "head", "natural motion must only confirm the head tracker");
+				if (confirmedAt < 0) confirmedAt = time;
+			}
+		}
+	}
+	Check(twoHeld, "natural motion fixture must hold both latency/noise hand pairs");
+	Check(confirmedAt >= 0 && confirmedAt <= 15, "20 Hz natural motion must confirm within 15 seconds");
+	std::printf("SPEED: head confirmed at %.2f s (20 Hz, 60 ms hand latency, noise, chest and foot present)\n", confirmedAt);
+}
+
+static void Scenario16()
+{
+	Hypothesis hypothesis;
+	hypothesis.pairs = { MakePair(0), MakePair(1) };
+	auto frames = HeadSamples(0.08);
+	hypothesis.candidates.push_back({ { 5, "head", "system-Y", frames.size() - 5 }, std::vector<Sample>(frames.begin(), frames.end() - 5) });
+	AutoAcquisition acquisition;
+	Check(!acquisition.Confirm(Evaluate({ hypothesis }), acquisition.Epoch()), "seed fixture needs first confirmation pass");
+	hypothesis.candidates.front().samples = frames;
+	hypothesis.candidates.front().candidate.count = frames.size();
+	auto confirmation = acquisition.Confirm(Evaluate({ hypothesis }), acquisition.Epoch());
+	Check(confirmation.has_value(), "five new evaluated candidate frames must provide a seed");
+	CalibrationContext context;
+	auto attempt = BeginAutomaticAttempt(*confirmation, CalibrationCapacity(context));
+	Check(attempt.automatic && attempt.serial == "head" && attempt.trackingSystem == "system-Y" && attempt.id == 5,
+		"automatic attempt must retain the confirmed identity");
+	const auto &seed = attempt.sampler.Store().Samples();
+	Check(seed.size() == frames.size(), "confirmation must seed every candidate frame within capacity");
+	for (size_t i = 0; i < seed.size(); ++i)
+		Check(seed[i].ref.trans == frames[i].ref.trans && seed[i].target.trans == frames[i].target.trans
+			&& seed[i].ref.rot == frames[i].ref.rot && seed[i].target.rot == frames[i].target.rot
+			&& seed[i].sequence == frames[i].sequence, "seed poses and sequence must remain raw and unchanged");
+	Check(CalibrationReadyToSolve(attempt, context.SampleCount()), "sufficient seed must be immediately solve-ready without new observations");
+	Check(AutomaticCalibrationSucceeded(SolveCalibration(attempt.sampler.Snapshot(), 1.0)), "seed alone must solve successfully without new samples");
+	Check(attempt.rigiditySampler.Store().Samples().empty(), "abandon evidence must start empty after seeding");
+	attempt.lastSolveCount = attempt.sampler.Store().Count();
+	Check(!CalibrationReadyToSolve(attempt, context.SampleCount()), "an already solved seed needs genuinely new samples before retry");
+	auto newer = frames.back();
+	attempt.sampler.Observe(30, newer.ref, true, newer.target, true, CalibrationCapacity(context));
+	newer.ref.trans.x() += 0.015; newer.target.trans += SyncRotation.transpose() * Eigen::Vector3d(0.015, 0, 0);
+	Check(attempt.sampler.Observe(30.05, newer.ref, true, newer.target, true, CalibrationCapacity(context)) == SampleEvent::Accepted,
+		"normal consecutive sampling must continue after the seed");
+	Check(CalibrationReadyToSolve(attempt, context.SampleCount()), "new samples after seed must enable another solve");
+	attempt.sampler.Observe(30.10, newer.ref, false, newer.target, true, CalibrationCapacity(context));
+	Check(attempt.sampler.Observe(30.15, newer.ref, true, newer.target, true, CalibrationCapacity(context)) == SampleEvent::SegmentRestarted
+		&& attempt.sampler.Store().Samples().empty(), "tracking recovery must invalidate a seeded segment just like normal samples");
+}
+
+static void Scenario17()
+{
+	Check(overlaylog::WindowsError(0xE1234567UL) == std::to_string(0xE1234567UL), "unmapped Windows error must preserve its numeric code");
+	Check(!overlaylog::ShouldRotate(0) && !overlaylog::ShouldRotate(2 * 1024 * 1024)
+		&& overlaylog::ShouldRotate(2 * 1024 * 1024 + 1), "log rotation must occur only above 2 MiB");
+	auto directory = std::filesystem::path("out/fast-acquisition-verification/log-test");
+	std::filesystem::create_directories(directory);
+	Check(!overlaylog::Append(directory, "unwritable destination"), "writing to a directory must fail without throwing");
+	auto path = directory / "overlay.log";
+	{ std::ofstream file(path, std::ios::binary | std::ios::trunc); file << "small"; }
+	overlaylog::Prepare(path);
+	Check(std::filesystem::file_size(path) == 5, "a small log must survive startup");
+	{ std::ofstream file(path, std::ios::binary | std::ios::trunc); file.seekp(2 * 1024 * 1024); file.put('x'); }
+	{ std::ofstream old(directory / "overlay.old.log", std::ios::trunc); old << "previous"; }
+	overlaylog::Prepare(path);
+	Check(!std::filesystem::exists(path) && std::filesystem::file_size(directory / "overlay.old.log") == 2 * 1024 * 1024 + 1,
+		"startup rotation must replace the previous old log");
+	Check(overlaylog::Append(path, "event serial=\"\xED\x97\xA4\xEB\x93\x9C\"\nnext\rline"), "file logging must recover after a failed write");
+	std::ifstream file(path, std::ios::binary);
+	std::string line((std::istreambuf_iterator<char>(file)), {});
+	Check(line.size() > 13 && line[2] == ':' && line[5] == ':' && line[8] == '.' && line[12] == ' '
+		&& std::count(line.begin(), line.end(), '\n') == 1 && line.find("\\nnext\\rline") != std::string::npos
+		&& line.find("\xED\x97\xA4\xEB\x93\x9C") != std::string::npos, "log must contain local milliseconds and one UTF-8 line per event");
+}
+
 static void Benchmark()
 {
 	Hypothesis hypothesis;
@@ -938,10 +1183,10 @@ static void Benchmark()
 int main(int argc, char **argv)
 {
 	const std::function<void()> scenarios[] = { Scenario1, Scenario2, Scenario3, Scenario4, Scenario5, Scenario6, Scenario7,
-		Scenario8, Scenario9, Scenario10, Scenario11, Scenario12, Scenario13 };
+		Scenario8, Scenario9, Scenario10, Scenario11, Scenario12, Scenario13, Scenario14, Scenario15, Scenario16, Scenario17 };
 	try
 	{
-		for (int i = 0; i < 13; ++i)
+		for (int i = 0; i < 17; ++i)
 		{
 			if (argc > 1 && std::atoi(argv[1]) != i + 1)
 				continue;

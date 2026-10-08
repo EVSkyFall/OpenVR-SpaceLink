@@ -18,6 +18,7 @@ struct CandidateEvidence
 	uint64_t count = 0;
 	Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
 	bool heightCertain = false;
+	std::vector<Sample> samples;
 };
 
 struct CandidateFrames
@@ -33,13 +34,30 @@ struct Hypothesis
 	std::vector<CandidateFrames> candidates;
 };
 
+struct PairDiagnostic
+{
+	std::string hand, controller;
+	size_t keyframes = 0;
+	SyncResult fit;
+};
+
+struct CandidateDiagnostic
+{
+	std::string serial;
+	size_t keyframes = 0;
+	CandidateCheck check;
+};
+
 struct Evaluation
 {
 	int handPairs = 0;
 	std::vector<CandidateEvidence> passing;
+	bool diagnostics = false;
+	std::vector<PairDiagnostic> pairs;
+	std::vector<CandidateDiagnostic> candidates;
 };
 
-Evaluation Evaluate(const std::vector<Hypothesis> &hypotheses);
+Evaluation Evaluate(const std::vector<Hypothesis> &hypotheses, bool diagnostics = false);
 
 class Confirmation
 {

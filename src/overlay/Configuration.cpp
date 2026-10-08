@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 #include "Configuration.h"
+#include "OverlayLog.h"
 #include "ProfileCodec.h"
 #include "AttemptLifecycle.h"
 
@@ -19,6 +20,8 @@ static void LogRegistryResult(const char *operation, const char *value, LSTATUS 
 	FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_IGNORE_INSERTS,
 		0, result, LANG_USER_DEFAULT, reinterpret_cast<LPSTR>(&message), 0, nullptr);
 	std::cerr << operation << " " << value << ": " << (message ? message : "Windows registry error") << " (" << result << ")\n";
+	overlaylog::Write("configuration-error operation=", std::quoted(operation), " value=", std::quoted(value),
+		" code=", result, " error=", std::quoted(overlaylog::WindowsError(result)));
 	if (message)
 		LocalFree(message);
 }
@@ -74,6 +77,8 @@ void LoadProfile(CalibrationContext &ctx)
 		if (ApplyProfileRead(result, text, ctx, *BeforeProfileRead, ProfileStorage, error))
 		{
 			BeforeProfileRead.reset();
+			overlaylog::Write("profile-read result=", result == ReadResult::Absent ? "absent" : "present",
+				" binding=", ctx.trackerSerial.empty() ? "unbound" : "bound", " serial=", std::quoted(ctx.trackerSerial), " error=", std::quoted(error));
 			if (!error.empty())
 				std::cerr << "Reading Config: " << error << '\n';
 		}
@@ -82,8 +87,12 @@ void LoadProfile(CalibrationContext &ctx)
 	{
 		std::string text, error;
 		auto result = ReadRegistryValue("Settings", text);
-		if (ApplySettingsRead(result, text, ctx, SettingsStorage, error) && !error.empty())
-			std::cerr << "Reading Settings: " << error << '\n';
+		if (ApplySettingsRead(result, text, ctx, SettingsStorage, error))
+		{
+			overlaylog::Write("settings-read result=", result == ReadResult::Absent ? "absent" : "present", " auto=", ctx.autoAcquire, " error=", std::quoted(error));
+			if (!error.empty())
+				std::cerr << "Reading Settings: " << error << '\n';
+		}
 	}
 }
 
