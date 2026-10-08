@@ -22,9 +22,9 @@ The headset's own (SLAM) tracking is still there underneath. It keeps your view 
 
 ## Installing
 
-Download the installer from the [Releases page](https://github.com/EVSkyFall/OpenVR-SpaceSync/releases) and run it. It registers the driver, sets SpaceSync to start with SteamVR, and turns on SteamVR's support for multiple tracking systems, so there is no SteamVR config to edit by hand. Then start SteamVR and open SpaceSync from the dashboard, or use its window on the desktop.
+Download `OpenVR-SpaceSync_Installer.exe` from the [Releases page](https://github.com/EVSkyFall/OpenVR-SpaceSync/releases), close SteamVR, and run it. It installs SpaceSync to `C:\Program Files\OpenVR-SpaceSync` and adds it to the Windows app list and the Start menu under the name SpaceSync. It also registers the driver, sets SpaceSync to start with SteamVR, and turns on SteamVR's support for multiple tracking systems, so there is no SteamVR config to edit by hand. Then start SteamVR and open SpaceSync from the dashboard, or use its window on the desktop. To upgrade later, run the newer installer the same way; it reinstalls SpaceSync in place.
 
-SpaceSync replaces OpenVR-SpaceOverride rather than running next to it: it keeps the same driver, settings, install folder and SteamVR app key, so installing it over OpenVR-SpaceOverride keeps your calibration. For the same reason, the installer, the install folder and the Windows app list still show the name OpenVR-SpaceOverride. If the installer says OpenVR-SpaceOverride is already installed, click **Yes** to reinstall. SpaceSync still works side by side with OpenVR Space Calibrator, as OpenVR-SpaceOverride does.
+SpaceSync replaces OpenVR-SpaceOverride rather than running next to it, because both use the same driver. If OpenVR-SpaceOverride is installed, the installer replaces it for you without asking, and your calibration carries over, since your settings live in your user registry, not in the install folder. A few things still carry the old name: the SteamVR add-on list shows the driver as `spaceoverride`, the overlay executable is `OpenVR-SpaceOverride.exe`, and the log folder is `%LOCALAPPDATA%\OpenVR-SpaceOverride`. SpaceSync still works side by side with OpenVR Space Calibrator, as OpenVR-SpaceOverride does.
 
 ### Building from source
 
@@ -37,7 +37,9 @@ cmake --preset x64-release
 cmake --build out/build/x64-release
 ```
 
-If CMake can't find Vulkan, add `-DVulkan_INCLUDE_DIR=<headers>/include -DVulkan_LIBRARY=<path>/vulkan-1.lib` to the `cmake --preset` call. The overlay (`OpenVR-SpaceOverride.exe`) and the driver (`driver_spaceoverride.dll`) end up in `out/build/x64-release`, and [`dev-resources/installer.nsi`](dev-resources/installer.nsi) is the NSIS script the installer is built from.
+If CMake can't find Vulkan, add `-DVulkan_INCLUDE_DIR=<headers>/include -DVulkan_LIBRARY=<path>/vulkan-1.lib` to the `cmake --preset` call. The overlay (`OpenVR-SpaceOverride.exe`) and the driver (`driver_spaceoverride.dll`) end up in `out/build/x64-release`.
+
+To build the installer from that output, you also need NSIS 3. Run [`dev-resources/build-installer.ps1`](dev-resources/build-installer.ps1): it stages the files from `out/build/x64-release` and runs NSIS' `makensis` on [`dev-resources/installer.nsi`](dev-resources/installer.nsi) to produce `OpenVR-SpaceSync_Installer.exe`. If `makensis` is not on your PATH, pass its location with `-Makensis <path>`.
 
 ## Automatic calibration with hand tracking
 
@@ -72,6 +74,7 @@ Once a tracker is calibrated as your head tracker, it stays bound until you pres
 - While the bound tracker is not tracking, the headset falls back to its own tracking with the last correction and picks the tracker up again as soon as it tracks. With **Fallback to SLAM** off, headset tracking pauses instead.
 - **Calibrate** with a bound tracker recalibrates that same tracker. It never switches to another one, and it waits if the tracker isn't tracking yet.
 - A manual calibration never gives up on its own: tracking interruptions pause it, and it keeps collecting until the result is good. **Cancel** in the progress window stops it, and the previous calibration stays in place.
+- If the head tracker ends up at a different angle on the headset than when it was calibrated, for example when you put it back on after charging, SpaceSync notices that the headset tilt it computes from the tracker no longer matches the headset's own. It switches the headset back to its own tracking right away and recalibrates the same tracker while you look around, and SteamVR shows `Head tracker moved on the headset. Look around naturally for a few seconds to recalibrate.` and then `Head tracker ready: <serial>.` The tracker can sit at any angle once it is calibrated, and small shifts of a few degrees are left alone. If you cancel this recalibration, SpaceSync doesn't try again until the calibration changes or SteamVR restarts.
 
 **Remove Calibration** starts over. With **Find head tracker automatically** on, SpaceSync searches again and finds the same tracker; turn the setting off if you want it to stop.
 
@@ -116,7 +119,7 @@ SpaceSync is not TrackingOverride. TrackingOverride simply substitutes one devic
 
 ### Can I run it next to OpenVR-SpaceOverride?
 
-No, SpaceSync replaces it. Both use the same driver, settings, install folder and SteamVR app key, so installing SpaceSync swaps one for the other and keeps your calibration.
+No. Both use the same driver, so SpaceSync replaces OpenVR-SpaceOverride, and its installer does that for you while keeping your calibration.
 
 ### Does it conflict with OpenVR Space Calibrator?
 
