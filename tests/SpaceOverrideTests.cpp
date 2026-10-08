@@ -1166,6 +1166,128 @@ static void Scenario17()
 		&& line.find("\xED\x97\xA4\xEB\x93\x9C") != std::string::npos, "log must contain local milliseconds and one UTF-8 line per event");
 }
 
+static void Scenario18()
+{
+	const double nan = std::numeric_limits<double>::quiet_NaN();
+	auto head = HeadSamples(0.08);
+	Check(IsHeadTracker(head, KnownSync()), "NaN fixture must start with a passing head tracker");
+	for (bool reference : { false, true })
+		for (bool all : { false, true })
+		{
+			auto invalid = head;
+			for (size_t i = 0; i < (all ? invalid.size() : 1); ++i)
+				(reference ? invalid[i].ref : invalid[i].target).trans.x() = nan;
+			auto check = CheckHeadTracker(invalid, KnownSync());
+			Check(std::isnan(check.distance.median) && std::isnan(check.spread.p90),
+				"even one NaN sample must propagate into candidate statistics");
+			Check(!IsHeadTracker(invalid, KnownSync()), "NaN sample statistics must never pass");
+		}
+	for (bool rotation : { false, true })
+	{
+		auto sync = KnownSync();
+		if (rotation) sync.rotation(0, 0) = nan;
+		else sync.translation.y() = nan;
+		auto check = CheckHeadTracker(head, sync);
+		Check(std::isnan(check.distance.median), "NaN sync fixture must produce NaN distance statistics");
+		Check(!IsHeadTracker(head, sync), "NaN sync statistics must never pass");
+	}
+	for (bool reference : { false, true })
+	{
+		auto invalid = head;
+		(reference ? invalid.front().ref : invalid.front().target).rot(0, 0) = nan;
+		auto check = CheckHeadTracker(invalid, KnownSync());
+		Check(check.rigidity.observable && std::isnan(check.rigidity.error.median),
+			"mixed NaN rotations must exercise observable NaN rigidity statistics");
+		Check(std::string(check.failure) == "rotation-median" && !IsHeadTracker(invalid, KnownSync()),
+			"NaN rigidity must fail at the first rotation criterion");
+	}
+}
+
+static std::vector<Sample> PitchedTracker(double pitch, bool chest, size_t count = 60)
+{
+	std::vector<Sample> samples;
+	for (size_t i = 0; i < count; ++i)
+	{
+		Sample sample;
+		sample.sequence = i + 1;
+		sample.time = i * 0.15;
+		Eigen::Matrix3d body = Rotation(0, 0.55 * std::sin(sample.time));
+		sample.ref.rot = body * Rotation(-pitch * Degrees, 0);
+		sample.ref.trans = Eigen::Vector3d(0, 1.65, 0);
+		Eigen::Matrix3d trackerRotation = chest ? body : sample.ref.rot;
+		// OpenVR forward is -Z; the back-of-head mount is +Z in the head frame.
+		Eigen::Vector3d offset = chest ? Eigen::Vector3d(0, -0.25, -0.10) : Eigen::Vector3d(0, 0.03, 0.08);
+		sample.target.rot = SyncRotation.transpose() * trackerRotation * Rotation(0.12, -0.24, 0.15);
+		sample.target.trans = SyncRotation.transpose() * (sample.ref.trans + trackerRotation * offset - SyncTranslation);
+		samples.push_back(sample);
+	}
+	return samples;
+}
+
+static void Scenario19()
+{
+	Check(std::string(CheckHeadTracker(HeadSamples(0.27, true, false), KnownSync()).failure) == "vertical",
+		"head-local vertical failure must precede world vertical failure");
+	for (double pitch : { 40.0, 50.0, 60.0 })
+		for (double error : { -0.05, 0.0, 0.05 })
+			for (bool heightCertain : { false, true })
+			{
+				auto sync = KnownSync();
+				sync.translation.y() += error;
+				sync.heightCertain = heightCertain;
+				auto chest = PitchedTracker(pitch, true);
+				auto check = CheckHeadTracker(chest, sync);
+				Check(check.rigidity.observable && check.rigidity.error.median <= 5 * Degrees
+					&& check.rigidity.error.p90 <= 12 * Degrees && check.agreement <= 15 * Degrees,
+					"looking-down chest fixture must pass every rigidity criterion");
+				Check(check.distance.median <= 0.35 && check.spread.p90 <= 0.15 && check.vertical.median >= -0.18,
+					"looking-down chest fixture must pass distance, spread and head-local vertical");
+				Check(std::abs(check.verticalWorld.median - (-0.25 + error)) < 1e-12,
+					"world vertical statistics must retain the synced gravity-aligned difference");
+				Check(std::string(check.failure) == "vertical-world" && !IsHeadTracker(chest, sync),
+					"looking-down chest must fail vertical-world for every pitch and sync height error");
+			}
+}
+
+static void Scenario20()
+{
+	for (double pitch : { 40.0, 50.0, 60.0 })
+		for (double error : { -0.05, 0.0, 0.05 })
+		{
+			Hypothesis hypothesis;
+			hypothesis.system = "system-Y";
+			hypothesis.pairs = { MakePair(0, 240, false, false, false), MakePair(1, 240, false, false, false) };
+			for (auto &pair : hypothesis.pairs)
+				for (auto &sample : pair.samples)
+					sample.ref.trans.y() += error;
+			auto sync = CombineHandPairs(hypothesis.pairs);
+			Check(sync.held && std::abs(sync.translation.y() - SyncTranslation.y() - error) < 0.005,
+				"chest confirmation fixture must hold hand sync with the requested vertical error");
+			AutoAcquisition acquisition;
+			for (size_t count : { 60, 65, 70, 75 })
+			{
+				hypothesis.candidates = { { { 6, "chest", "system-Y", count }, PitchedTracker(pitch, true, count) } };
+				auto evaluation = Evaluate({ hypothesis }, true);
+				Check(!acquisition.Confirm(evaluation, acquisition.Epoch()),
+					"a lone looking-down chest must never confirm across growing evidence");
+			}
+		}
+}
+
+static void Scenario21()
+{
+	for (double pitch : { 40.0, 50.0, 60.0 })
+		for (double error : { -0.05, 0.0, 0.05 })
+			for (bool heightCertain : { false, true })
+			{
+				auto sync = KnownSync();
+				sync.translation.y() += error;
+				sync.heightCertain = heightCertain;
+				Check(IsHeadTracker(PitchedTracker(pitch, false), sync),
+					"back-of-head tracker must pass while looking down despite sync height error");
+			}
+}
+
 static void Benchmark()
 {
 	Hypothesis hypothesis;
@@ -1183,10 +1305,11 @@ static void Benchmark()
 int main(int argc, char **argv)
 {
 	const std::function<void()> scenarios[] = { Scenario1, Scenario2, Scenario3, Scenario4, Scenario5, Scenario6, Scenario7,
-		Scenario8, Scenario9, Scenario10, Scenario11, Scenario12, Scenario13, Scenario14, Scenario15, Scenario16, Scenario17 };
+		Scenario8, Scenario9, Scenario10, Scenario11, Scenario12, Scenario13, Scenario14, Scenario15, Scenario16, Scenario17,
+		Scenario18, Scenario19, Scenario20, Scenario21 };
 	try
 	{
-		for (int i = 0; i < 17; ++i)
+		for (int i = 0; i < 21; ++i)
 		{
 			if (argc > 1 && std::atoi(argv[1]) != i + 1)
 				continue;

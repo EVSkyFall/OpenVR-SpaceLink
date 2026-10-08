@@ -77,7 +77,7 @@ RigidityResult FitRigidity(const std::vector<Sample> &samples, const Eigen::Matr
 struct CandidateCheck
 {
 	RigidityResult rigidity;
-	ErrorStats distance, vertical, spread;
+	ErrorStats distance, vertical, verticalWorld, spread;
 	double agreement = 0;
 	const char *failure = "pass";
 };
