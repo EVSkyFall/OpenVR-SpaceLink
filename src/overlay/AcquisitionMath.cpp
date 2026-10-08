@@ -6,6 +6,7 @@
 #include <cmath>
 #include <limits>
 #include <set>
+#include <string_view>
 
 namespace acquisition
 {
@@ -182,7 +183,7 @@ SyncResult FitHandPairs(const std::vector<HandPair> &pairs)
 			if (!IsHoldout(k))
 				rows.push_back({ &samples[k], p });
 		}
-		enough = enough && samples.size() >= 40 && std::sqrt(spread / samples.size()) >= 0.15;
+		enough = enough && samples.size() >= 12 && std::sqrt(spread / samples.size()) >= 0.10;
 	}
 	if (rows.empty())
 		return result;
@@ -236,16 +237,18 @@ SyncResult FitHandPairs(const std::vector<HandPair> &pairs)
 			}
 	}
 	result.error = Statistics(std::move(errors));
-	result.held = enough && result.error.median <= 0.04 && result.error.p90 <= 0.08;
+	result.held = enough && result.error.median <= 0.08 && result.error.p90 <= 0.15;
 	result.handPairs = result.held ? static_cast<int>(pairs.size()) : 0;
 	return result;
 }
 
-SyncResult CombineHandPairs(const std::vector<HandPair> &pairs)
+SyncResult CombineHandPairs(const std::vector<HandPair> &pairs, std::vector<SyncResult> *individual)
 {
 	std::vector<SyncResult> fits;
 	for (const auto &pair : pairs)
 		fits.push_back(FitHandPairs({ pair }));
+	if (individual)
+		*individual = fits;
 	SyncResult best;
 	for (size_t seed = 0; seed < pairs.size(); ++seed)
 	{
@@ -290,13 +293,11 @@ ErrorStats RotationConsistency(const std::vector<Sample> &samples, const Eigen::
 	return Statistics(std::move(errors));
 }
 
-RigidityResult FitRigidity(const std::vector<Sample> &samples)
+RigidityResult FitRigidity(const std::vector<Sample> &samples, const Eigen::Matrix3d &preferredRotation)
 {
 	RigidityResult result;
-	std::vector<Eigen::Matrix3d> rotations;
-	for (const auto &sample : samples)
-		rotations.push_back(sample.ref.rot);
-	if (RotationInformation(rotations) < 0.10 * 0.10)
+	result.error = Statistics({});
+	if (samples.size() < 8)
 		return result;
 	Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
 	size_t deltas = 0;
@@ -311,8 +312,11 @@ RigidityResult FitRigidity(const std::vector<Sample> &samples)
 				++deltas;
 			}
 		}
-	if (!deltas)
+	result.deltas = deltas;
+	if (deltas < 10)
 		return result;
+	// A single rotation axis leaves a free twist; use the hand sync to resolve only that ambiguity.
+	covariance += 1e-9 * static_cast<double>(deltas) * preferredRotation;
 	Eigen::JacobiSVD<Eigen::Matrix3d> svd(covariance, Eigen::ComputeFullU | Eigen::ComputeFullV);
 	Eigen::Matrix3d sign = Eigen::Matrix3d::Identity();
 	sign(2, 2) = (svd.matrixU() * svd.matrixV().transpose()).determinant() < 0 ? -1 : 1;
@@ -322,42 +326,19 @@ RigidityResult FitRigidity(const std::vector<Sample> &samples)
 	return result;
 }
 
-bool IsHeadTracker(const std::vector<Sample> &samples, const SyncResult &sync, RigidityResult *rigidity)
+CandidateCheck CheckHeadTracker(const std::vector<Sample> &samples, const SyncResult &sync)
 {
-	auto fit = FitRigidity(samples);
-	if (rigidity)
-		*rigidity = fit;
-	if (!sync.held || !fit.observable || fit.error.median > 3 * Degrees || fit.error.p90 > 8 * Degrees
-		|| RotationAngle(fit.rotation * sync.rotation.transpose()) > 10 * Degrees)
-		return false;
-	std::vector<Eigen::Vector3d> worldOffsets;
+	CandidateCheck check;
+	check.rigidity = FitRigidity(samples, sync.rotation);
+	check.agreement = RotationAngle(check.rigidity.rotation * sync.rotation.transpose());
+	std::vector<Eigen::Vector3d> offsets;
 	std::vector<double> distances, heights;
 	for (const auto &sample : samples)
 	{
 		Eigen::Vector3d delta = sync.rotation * sample.target.trans + sync.translation - sample.ref.trans;
-		worldOffsets.push_back(delta);
-		distances.push_back(sync.heightCertain ? delta.norm() : std::hypot(delta.x(), delta.z()));
-		heights.push_back(std::abs(delta.y()));
-	}
-	double verticalShift = 0;
-	if (!sync.heightCertain)
-	{
-		Eigen::MatrixXd coefficients(samples.size() * 3, 4);
-		Eigen::VectorXd constants(samples.size() * 3);
-		for (size_t k = 0; k < samples.size(); ++k)
-		{
-			coefficients.block<3, 3>(3 * k, 0) = samples[k].ref.rot;
-			coefficients.block<3, 1>(3 * k, 3) = Eigen::Vector3d::UnitY();
-			constants.segment<3>(3 * k) = worldOffsets[k];
-		}
-		verticalShift = coefficients.completeOrthogonalDecomposition().solve(constants)(3);
-	}
-	std::vector<Eigen::Vector3d> offsets;
-	std::vector<double> localHeights;
-	for (size_t k = 0; k < samples.size(); ++k)
-	{
-		offsets.push_back(samples[k].ref.rot.transpose() * (worldOffsets[k] - verticalShift * Eigen::Vector3d::UnitY()));
-		localHeights.push_back(offsets.back().y());
+		distances.push_back(delta.norm());
+		offsets.push_back(sample.ref.rot.transpose() * delta);
+		heights.push_back(offsets.back().y());
 	}
 	Eigen::Vector3d center;
 	for (int axis = 0; axis < 3; ++axis)
@@ -370,10 +351,27 @@ bool IsHeadTracker(const std::vector<Sample> &samples, const SyncResult &sync, R
 	std::vector<double> deviations;
 	for (const auto &offset : offsets)
 		deviations.push_back((offset - center).norm());
-	return Statistics(std::move(distances)).median <= 0.30
-		&& (sync.heightCertain || Statistics(std::move(heights)).median <= 0.40)
-		&& (!sync.heightCertain || Statistics(std::move(localHeights)).median >= -0.15)
-		&& Statistics(std::move(deviations)).p90 <= 0.10;
+	check.distance = Statistics(std::move(distances));
+	check.vertical = Statistics(std::move(heights));
+	check.spread = Statistics(std::move(deviations));
+	if (!sync.held) check.failure = "hand-sync";
+	else if (samples.size() < 8) check.failure = "keyframes";
+	else if (!check.rigidity.observable) check.failure = "rotation-deltas";
+	else if (check.rigidity.error.median > 5 * Degrees) check.failure = "rotation-median";
+	else if (check.rigidity.error.p90 > 12 * Degrees) check.failure = "rotation-p90";
+	else if (check.agreement > 15 * Degrees) check.failure = "sync-rotation";
+	else if (check.distance.median > 0.35) check.failure = "distance";
+	else if (check.spread.p90 > 0.15) check.failure = "offset-spread";
+	else if (check.vertical.median < -0.18) check.failure = "vertical";
+	return check;
+}
+
+bool IsHeadTracker(const std::vector<Sample> &samples, const SyncResult &sync, RigidityResult *rigidity)
+{
+	auto check = CheckHeadTracker(samples, sync);
+	if (rigidity)
+		*rigidity = check.rigidity;
+	return std::string_view(check.failure) == "pass";
 }
 
 }

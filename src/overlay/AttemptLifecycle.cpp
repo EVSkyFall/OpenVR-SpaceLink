@@ -3,6 +3,29 @@
 #include "AttemptLifecycle.h"
 #include "AutoAcquisition.h"
 
+CalibrationAttempt BeginAutomaticAttempt(const acquisition::CandidateEvidence &candidate, size_t capacity)
+{
+	CalibrationAttempt attempt;
+	attempt.automatic = true;
+	attempt.serial = candidate.serial;
+	attempt.trackingSystem = candidate.system;
+	attempt.id = candidate.id;
+	attempt.confirmationRotation = candidate.rotation;
+	attempt.sampler.Seed(candidate.samples, capacity);
+	return attempt;
+}
+
+bool CalibrationReadyToSolve(const CalibrationAttempt &attempt, size_t required)
+{
+	const auto &store = attempt.sampler.Store();
+	if (store.Samples().size() < required || store.Count() == attempt.lastSolveCount)
+		return false;
+	std::vector<Eigen::Matrix3d> rotations;
+	for (const auto &sample : store.Samples())
+		rotations.push_back(sample.target.rot);
+	return acquisition::RotationInformation(rotations) >= 0.10 * 0.10;
+}
+
 void ClearCommittedProfile(CalibrationContext &ctx)
 {
 	ctx.chaperone.geometry.clear();

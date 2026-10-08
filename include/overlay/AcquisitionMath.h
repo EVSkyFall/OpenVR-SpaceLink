@@ -5,6 +5,7 @@
 #include <Dense>
 #include <openvr.h>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace acquisition
@@ -47,6 +48,7 @@ struct HandPair
 {
 	uint32_t hand = 0, controller = 0;
 	std::vector<Sample> samples;
+	std::string handSerial, controllerSerial;
 };
 
 struct SyncResult
@@ -60,17 +62,26 @@ struct SyncResult
 };
 
 SyncResult FitHandPairs(const std::vector<HandPair> &pairs);
-SyncResult CombineHandPairs(const std::vector<HandPair> &pairs);
+SyncResult CombineHandPairs(const std::vector<HandPair> &pairs, std::vector<SyncResult> *individual = nullptr);
 
 struct RigidityResult
 {
 	bool observable = false;
+	size_t deltas = 0;
 	Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
 	ErrorStats error;
 };
 
 ErrorStats RotationConsistency(const std::vector<Sample> &samples, const Eigen::Matrix3d &rotation);
-RigidityResult FitRigidity(const std::vector<Sample> &samples);
+RigidityResult FitRigidity(const std::vector<Sample> &samples, const Eigen::Matrix3d &preferredRotation = Eigen::Matrix3d::Identity());
+struct CandidateCheck
+{
+	RigidityResult rigidity;
+	ErrorStats distance, vertical, spread;
+	double agreement = 0;
+	const char *failure = "pass";
+};
+CandidateCheck CheckHeadTracker(const std::vector<Sample> &samples, const SyncResult &sync);
 bool IsHeadTracker(const std::vector<Sample> &samples, const SyncResult &sync, RigidityResult *rigidity = nullptr);
 
 }
