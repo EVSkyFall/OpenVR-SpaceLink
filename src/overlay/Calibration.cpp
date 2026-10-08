@@ -10,12 +10,14 @@
 #include "AutoAcquisition.h"
 #include "DesiredState.h"
 #include "ManualDetection.h"
+#include "OverlayLog.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <future>
 #include <optional>
+#include <tuple>
 
 using acquisition::Pose;
 
@@ -30,7 +32,10 @@ static std::future<acquisition::Evaluation> AcquisitionWork;
 static std::future<acquisition::CalibrationSolution> CalibrationWork;
 static uint64_t Generation = 0, AcquisitionGeneration = 0, AcquisitionEpoch = 0;
 static uint64_t SolveGeneration = 0, SolveSegment = 0;
-static double NextEvaluation = 0, NextSolve = 0, LastApply = -1;
+static double NextEvaluation = 0, NextSearchLog = 0, NextSolve = 0, LastApply = -1;
+static std::string SolveSerial;
+static size_t SolveKeyframes = 0;
+static bool SolveAutomatic = false;
 static bool RawPoseReady = false;
 static vr::VRNotificationId (*ShowCalibrationNotification)(const char *, vr::EVRNotificationType) = nullptr;
 static void (*RemoveCalibrationNotification)(vr::VRNotificationId) = nullptr;
@@ -156,8 +161,17 @@ static void RemoveFoundNotification()
 	CalCtx.notificationId = 0;
 }
 
-static void EndAttempt()
+static const char *AttemptMode() { return Attempt && Attempt->automatic ? "automatic" : "manual"; }
+
+static void LogAttemptEnd(const char *event, const char *reason)
 {
+	if (Attempt)
+		overlaylog::Write(event, " attempt=", Generation, " mode=", AttemptMode(), " serial=", std::quoted(Attempt->serial), " reason=", reason);
+}
+
+static void EndAttempt(const char *event, const char *reason)
+{
+	LogAttemptEnd(event, reason);
 	RemoveFoundNotification();
 	DiscardAttempt(CalCtx, Attempt);
 	Detection = {};
@@ -170,10 +184,11 @@ void CalibrationContext::Clear()
 {
 	if (this == &CalCtx)
 	{
+		LogAttemptEnd("cancel", "removed");
 		RemoveCalibrationState(*this, Attempt, Acquisition);
 		Acquisition.Refresh(Devices);
 		AcquisitionResult = {};
-		EndAttempt();
+		EndAttempt("cancel", "removed");
 	}
 	else
 		ClearCommittedProfile(*this);
@@ -188,15 +203,18 @@ void RemoveCalibration()
 void CancelCalibration()
 {
 	if (Attempt && !Attempt->automatic)
-		EndAttempt();
+		EndAttempt("cancel", "user");
 }
 
 static void ApplyAutoAcquire(bool enabled)
 {
+	if (!enabled && Attempt && Attempt->automatic)
+		LogAttemptEnd("cancel", "auto-off");
+	overlaylog::Write("auto-setting enabled=", enabled);
 	bool ended = ApplyAutoAcquireState(CalCtx, Attempt, Acquisition, enabled);
 	AcquisitionResult = {};
 	if (ended)
-		EndAttempt();
+		EndAttempt("cancel", "auto-off");
 	if (enabled)
 		Acquisition.Refresh(Devices);
 }
@@ -255,6 +273,8 @@ static void Status(const std::string &text)
 	CalCtx.statusLine = text;
 	if (!Attempt)
 		return;
+	if (Attempt->statusLine != text)
+		overlaylog::Write("attempt-status attempt=", Generation, " mode=", AttemptMode(), " serial=", std::quoted(Attempt->serial), " text=", std::quoted(text));
 	Attempt->statusLine = text;
 	if (!Attempt->automatic)
 	{
@@ -283,7 +303,7 @@ static void ChooseTracker(uint32_t id)
 void StartCalibration()
 {
 	if (Attempt)
-		EndAttempt();
+		EndAttempt("cancel", "manual-request");
 	++Generation;
 	Attempt.emplace();
 	CalCtx.messages.clear();
@@ -303,11 +323,25 @@ void StartCalibration()
 		CalCtx.state = CalibrationState::Begin;
 		Status("Waiting for a head tracker.");
 	}
+	overlaylog::Write("attempt-start attempt=", Generation, " mode=manual serial=", std::quoted(Attempt->serial), " seed=0");
 }
 
 static bool AutoEligible()
 {
 	return AutoAcquisitionEligible(CalCtx, ProfileReadSucceeded(), SettingsReadSucceeded());
+}
+
+static void LogSearch(const acquisition::Evaluation &evaluation)
+{
+	if (!evaluation.diagnostics) return;
+	overlaylog::Write("search held_pairs=", evaluation.handPairs, " passing=", evaluation.passing.size());
+	for (const auto &pair : evaluation.pairs)
+		overlaylog::Write("hand-pair ", std::quoted(pair.hand), " <-> ", std::quoted(pair.controller),
+			" keyframes=", pair.keyframes, " held=", pair.fit.held, " median_m=", pair.fit.error.median, " p90_m=", pair.fit.error.p90);
+	for (const auto &candidate : evaluation.candidates)
+		overlaylog::Write("candidate serial=", std::quoted(candidate.serial), " keyframes=", candidate.keyframes,
+			" rigidity_deg=", candidate.check.rigidity.error.median / acquisition::Degrees,
+			" distance_m=", candidate.check.distance.median, " vertical_m=", candidate.check.vertical.median, " result=", candidate.check.failure);
 }
 
 static void TickAcquisition(double time, const ObservationSpace &observationSpace)
@@ -322,16 +356,16 @@ static void TickAcquisition(double time, const ObservationSpace &observationSpac
 			if (AutoEligible() && AcquisitionGeneration == Generation && AcquisitionEpoch == Acquisition.Epoch())
 			{
 				AcquisitionResult = std::move(result);
+				LogSearch(AcquisitionResult);
 				auto confirmed = Acquisition.Confirm(AcquisitionResult, AcquisitionEpoch);
 				if (confirmed)
 				{
-					Attempt.emplace();
-					Attempt->automatic = true;
-					Attempt->confirmationRotation = confirmed->rotation;
-					Attempt->serial = confirmed->serial;
-					Attempt->trackingSystem = confirmed->system;
-					ChooseTracker(ResolveSerial(Devices, confirmed->serial));
+					overlaylog::Write("confirmation serial=", std::quoted(confirmed->serial), " keyframes=", confirmed->samples.size(), " evidence=", confirmed->count);
+					Attempt = BeginAutomaticAttempt(*confirmed, CalibrationCapacity(CalCtx));
+					NextSolve = 0;
 					++Generation;
+					ChooseTracker(ResolveSerial(Devices, confirmed->serial));
+					overlaylog::Write("attempt-start attempt=", Generation, " mode=automatic serial=", std::quoted(Attempt->serial), " seed=", Attempt->sampler.Store().Samples().size());
 					if (ShowCalibrationNotification)
 					{
 						auto notice = FoundNotice(confirmed->serial);
@@ -343,6 +377,7 @@ static void TickAcquisition(double time, const ObservationSpace &observationSpac
 		catch (const std::exception &error)
 		{
 			std::cerr << "Evaluating acquisition: " << error.what() << '\n';
+			overlaylog::Write("error context=acquisition error=", std::quoted(error.what()));
 		}
 	}
 	if (!AutoEligible())
@@ -352,8 +387,10 @@ static void TickAcquisition(double time, const ObservationSpace &observationSpac
 		AcquisitionGeneration = Generation;
 		AcquisitionEpoch = Acquisition.Epoch();
 		NextEvaluation = time + 1.0;
+		bool diagnostics = time >= NextSearchLog;
+		if (diagnostics) NextSearchLog = time + 5.0;
 		auto input = Acquisition.Snapshot();
-		AcquisitionWork = std::async(std::launch::async, [input = std::move(input)] { return acquisition::Evaluate(input); });
+		AcquisitionWork = std::async(std::launch::async, [input = std::move(input), diagnostics] { return acquisition::Evaluate(input, diagnostics); });
 	}
 }
 
@@ -375,12 +412,33 @@ static void TickManualDetection(double time)
 		break;
 	case ManualDetection::Event::Selected:
 		Attempt->serial = result.serial;
+		overlaylog::Write("tracker-selected attempt=", Generation, " serial=", std::quoted(result.serial));
 		ChooseTracker(result.id);
 		break;
 	case ManualDetection::Event::Collecting:
 		Status("Move your head to identify the head tracker.");
 		CalCtx.Progress(static_cast<int>(Detection.Progress()), 40);
 		break;
+	}
+}
+
+static acquisition::CalibrationSolution ReceiveSolve(bool current)
+{
+	try
+	{
+		auto result = CalibrationWork.get();
+		bool success = SolveAutomatic ? acquisition::AutomaticCalibrationSucceeded(result) : result.holdout.rms <= 0.10;
+		overlaylog::Write("solve attempt=", SolveGeneration, " mode=", SolveAutomatic ? "automatic" : "manual",
+			" serial=", std::quoted(SolveSerial), " keyframes=", SolveKeyframes, " rms_m=", result.holdout.rms,
+			" p90_m=", result.holdout.p90, " rotation_deg=", result.rotationError.median / acquisition::Degrees,
+			" success=", success, " result=", current ? (success ? "commit" : "collecting") : "stale");
+		return result;
+	}
+	catch (const std::exception &error)
+	{
+		overlaylog::Write("solve attempt=", SolveGeneration, " mode=", SolveAutomatic ? "automatic" : "manual",
+			" serial=", std::quoted(SolveSerial), " keyframes=", SolveKeyframes, " result=error error=", std::quoted(error.what()));
+		throw;
 	}
 }
 
@@ -407,6 +465,7 @@ static void TickSampling(double time)
 	}
 	else if (event == acquisition::SampleEvent::SegmentRestarted)
 	{
+		overlaylog::Write("segment-restart attempt=", Generation, " serial=", std::quoted(Attempt->serial), " segment=", Attempt->sampler.Segment(), " reason=headset-tracking-jump-or-return");
 		Attempt->lastSolveCount = 0;
 		Attempt->rigiditySampler.Clear();
 		Attempt->paused = true;
@@ -431,7 +490,7 @@ static void TickSampling(double time)
 		if (acquisition::AutomaticCalibrationAbandoned(newer.size(), acquisition::RotationConsistency(newer, Attempt->confirmationRotation).median))
 		{
 			Acquisition.ResetConfirmations();
-			EndAttempt();
+			EndAttempt("abandon", "new-rotation-evidence");
 			return;
 		}
 	}
@@ -439,7 +498,7 @@ static void TickSampling(double time)
 	{
 		try
 		{
-			auto result = CalibrationWork.get();
+			auto result = ReceiveSolve(SolveGeneration == Generation && SolveSegment == Attempt->sampler.Segment());
 			if (SolveGeneration == Generation && SolveSegment == Attempt->sampler.Segment())
 			{
 				Attempt->result = result;
@@ -451,7 +510,7 @@ static void TickSampling(double time)
 					bool automatic = Attempt->automatic;
 					CommitAttempt(CalCtx, *Attempt);
 					SaveProfile(CalCtx);
-					EndAttempt();
+					EndAttempt("commit", "solve-succeeded");
 					if (automatic && ShowCalibrationNotification)
 					{
 						auto notice = ReadyNotice(CalCtx);
@@ -482,10 +541,7 @@ static void TickSampling(double time)
 	const auto &store = Attempt->sampler.Store();
 	if (store.Samples().size() >= CalCtx.SampleCount() && store.Count() != Attempt->lastSolveCount && !CalibrationWork.valid() && time >= NextSolve)
 	{
-		std::vector<Eigen::Matrix3d> rotations;
-		for (const auto &sample : store.Samples())
-			rotations.push_back(sample.target.rot);
-		if (acquisition::RotationInformation(rotations) < 0.10 * 0.10)
+		if (!CalibrationReadyToSolve(*Attempt, CalCtx.SampleCount()))
 		{
 			Status("Need more varied head movement. Tilt and turn your head in different directions.");
 			return;
@@ -493,6 +549,10 @@ static void TickSampling(double time)
 		Attempt->lastSolveCount = store.Count();
 		SolveGeneration = Generation;
 		SolveSegment = Attempt->sampler.Segment();
+		SolveSerial = Attempt->serial;
+		SolveAutomatic = Attempt->automatic;
+		SolveKeyframes = store.Samples().size();
+		overlaylog::Write("solve-start attempt=", SolveGeneration, " serial=", std::quoted(SolveSerial), " keyframes=", SolveKeyframes);
 		auto samples = Attempt->sampler.Snapshot();
 		double scale = Attempt->modelScale;
 		try
@@ -505,6 +565,48 @@ static void TickSampling(double time)
 			NextSolve = time + 1.0;
 			throw;
 		}
+	}
+}
+
+static void LogDeviceAndAcquisitionChanges()
+{
+	static std::vector<DeviceSnapshot> previous;
+	static std::optional<AcquireState> previousState;
+	for (auto &device : Devices)
+	{
+		device.connected = CalCtx.devicePoses[device.id].bDeviceIsConnected;
+		device.poseValid = CalCtx.devicePoses[device.id].bPoseIsValid;
+	}
+	// Hand tracking flips pose validity whenever a hand leaves view, so only identity changes reprint the list.
+	auto fields = [](const DeviceSnapshot &d) {
+		return std::tie(d.id, d.deviceClass, d.role, d.serial, d.trackingSystem);
+	};
+	if (!previousState || previous.size() != Devices.size()
+		|| !std::equal(Devices.begin(), Devices.end(), previous.begin(), [&](const auto &a, const auto &b) { return fields(a) == fields(b); }))
+	{
+		overlaylog::Write("devices count=", Devices.size());
+		for (const auto &d : Devices)
+			overlaylog::Write("device index=", d.id, " class=", d.deviceClass, " role_hint=", d.role,
+				" serial=", std::quoted(d.serial), " system=", std::quoted(d.trackingSystem), " connected=", d.connected, " pose_valid=", d.poseValid);
+		previous = Devices;
+	}
+	auto state = DescribeAcquisition(CalCtx, Attempt ? &*Attempt : nullptr, ProfileReadSucceeded(), SettingsReadSucceeded(), Acquisition.HasHands(), AcquisitionResult.handPairs);
+	if (!previousState || *previousState != state)
+	{
+		const char *name = "unknown";
+		switch (state)
+		{
+		case AcquireState::Off: name = "off"; break;
+		case AcquireState::Bound: name = "bound"; break;
+		case AcquireState::ProfileUnreadable: name = "profile-pending"; break;
+		case AcquireState::NeedHands: name = "need-hands"; break;
+		case AcquireState::Syncing: name = "syncing"; break;
+		case AcquireState::Searching: name = "searching"; break;
+		case AcquireState::Calibrating: name = "calibrating"; break;
+		case AcquireState::Paused: name = "paused"; break;
+		}
+		overlaylog::Write("acquisition state=", name);
+		previousState = state;
 	}
 }
 
@@ -526,12 +628,13 @@ void CalibrationTick(double time)
 			ApplyAutoAcquire(CalCtx.autoAcquire);
 		if (Attempt && !CalCtx.trackerSerial.empty() && Attempt->serial != CalCtx.trackerSerial)
 		{
-			EndAttempt();
+			EndAttempt("cancel", "profile-binding-changed");
 			StartCalibration();
 		}
 		RefreshDevices();
 		CalCtx.timeLastScan = time;
 	}
+	LogDeviceAndAcquisitionChanges();
 	if (scan || connected || (CalCtx.state == CalibrationState::Editing && time - LastApply >= 0.1))
 		ApplyCommittedState();
 	if (scan && CalCtx.validProfile && CalCtx.chaperone.valid && CalCtx.chaperone.autoApply)
@@ -544,14 +647,14 @@ void CalibrationTick(double time)
 	}
 	if (Attempt && CalCtx.state != CalibrationState::Begin && CalCtx.state != CalibrationState::Detect
 		&& CalCtx.state != CalibrationState::WaitForTracker && CalCtx.state != CalibrationState::Sampling)
-		EndAttempt();
+		EndAttempt("cancel", "calibration-state-changed");
 	try
 	{
 		TickAcquisition(time, observationSpace);
 		if (!Attempt)
 		{
 			if (CalibrationWork.valid() && CalibrationWork.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
-				CalibrationWork.get();
+				ReceiveSolve(false);
 			return;
 		}
 		if (CalCtx.state == CalibrationState::Begin || CalCtx.state == CalibrationState::Detect)
@@ -585,6 +688,7 @@ void CalibrationTick(double time)
 	catch (const std::exception &error)
 	{
 		std::cerr << "Calibration tick: " << error.what() << '\n';
+		overlaylog::Write("error context=tick error=", std::quoted(error.what()));
 	}
 }
 

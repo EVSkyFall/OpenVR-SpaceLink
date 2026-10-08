@@ -7,7 +7,7 @@
 
 #include <optional>
 
-namespace acquisition { class AutoAcquisition; }
+namespace acquisition { class AutoAcquisition; struct CandidateEvidence; }
 
 struct CalibrationAttempt
 {
@@ -21,6 +21,9 @@ struct CalibrationAttempt
 	double modelScale = 1.0;
 	uint64_t lastSolveCount = 0;
 };
+
+CalibrationAttempt BeginAutomaticAttempt(const acquisition::CandidateEvidence &candidate, size_t capacity);
+bool CalibrationReadyToSolve(const CalibrationAttempt &attempt, size_t required);
 
 void ClearCommittedProfile(CalibrationContext &committed);
 void CommitAttempt(CalibrationContext &committed, const CalibrationAttempt &attempt);

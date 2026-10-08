@@ -34,6 +34,8 @@
 
 #include "Calibration.h"
 #include "Configuration.h"
+#include "OverlayLog.h"
+#include "Version.h"
 #include "UserInterface.h"
 
 #ifdef _WIN32
@@ -130,6 +132,8 @@ static auto ShowNotification(const char* text, vr::EVRNotificationType type) -> 
 
 int main(int argc, char** argv)
 {
+    overlaylog::Initialize();
+    overlaylog::Write("startup version=", std::quoted(SPACECAL_VERSION_STRING));
 #ifdef _WIN32
     ShowWindow(GetConsoleWindow(), SW_HIDE);
 #endif
@@ -216,6 +220,9 @@ int main(int argc, char** argv)
     try {
         InitCalibrator();
         LoadProfile(CalCtx);
+        overlaylog::Write("startup-profile read=", ProfileReadSucceeded() ? "resolved" : "pending",
+            " binding=", CalCtx.trackerSerial.empty() ? "unbound" : "bound", " serial=", std::quoted(CalCtx.trackerSerial),
+            " settings=", SettingsReadSucceeded() ? "resolved" : "pending", " auto=", CalCtx.autoAcquire);
     }
     catch (std::exception& ex) {
 #ifdef _WIN32
