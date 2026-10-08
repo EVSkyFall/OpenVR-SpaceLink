@@ -2,30 +2,41 @@
 ; Include Modern UI
 
 !include "MUI2.nsh"
+!include "FileFunc.nsh"
 
 ;--------------------------------
 ; General Configuration
 
-!define APP_VERSION "2.4.0"
-!define APP_VERSION_META "2.4.0.0"
-!define APP_NAME "OpenVR-SpaceOverride"
+!define APP_VERSION "1.0.0"
+!define APP_VERSION_META "1.0.0.0"
+!define APP_NAME "OpenVR-SpaceSync"
+!define DISPLAY_NAME "SpaceSync"
 
 !define INSTALL_DIR "$PROGRAMFILES64\${APP_NAME}"
-!define LICENSE_FILE "../bin/LICENSE.txt"
+!ifndef FILES_DIR
 !define FILES_DIR "../bin/"
+!endif
+!ifndef DRIVER_DIR
 !define DRIVER_DIR "driver"
+!endif
+!ifndef LICENSE_FILE
+!define LICENSE_FILE "${FILES_DIR}\LICENSE.txt"
+!endif
+!ifndef OUT_DIR
+!define OUT_DIR "."
+!endif
 
-Name "${APP_NAME}"
-OutFile "${APP_NAME}_Installer.exe"
+Name "${DISPLAY_NAME}"
+OutFile "${OUT_DIR}\${APP_NAME}_Installer.exe"
 InstallDir "${INSTALL_DIR}"
 InstallDirRegKey HKLM "Software\${APP_NAME}\Main" ""
 RequestExecutionLevel admin
 ShowInstDetails show
 
 VIProductVersion "${APP_VERSION_META}"
-VIAddVersionKey /LANG=1033 "ProductName" "${APP_NAME}"
-VIAddVersionKey /LANG=1033 "FileDescription" "${APP_NAME} Installer"
-VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Nyabsi"
+VIAddVersionKey /LANG=1033 "ProductName" "${DISPLAY_NAME}"
+VIAddVersionKey /LANG=1033 "FileDescription" "${DISPLAY_NAME} Installer"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Nyabsi; SpaceSync changes Copyright (c) 2026 EVSkyFall"
 VIAddVersionKey /LANG=1033 "FileVersion" "${APP_VERSION_META}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${APP_VERSION}"
 
@@ -33,6 +44,7 @@ VIAddVersionKey /LANG=1033 "ProductVersion" "${APP_VERSION}"
 ; Variables
 
 Var alreadyInstalled
+Var legacyInstallDir
 
 ;--------------------------------
 ; Interface Settings
@@ -63,28 +75,33 @@ Function dirPre
         Abort
 FunctionEnd
 
+Function GetUninstallDirectory
+    StrCpy $R1 $R0 1
+    StrCmp $R1 '$\"' 0 +2
+        StrCpy $R0 $R0 "" 1
+    ${GetParent} "$R0" $R0
+FunctionEnd
+
 Function .onInit
     StrCpy $alreadyInstalled "false"
 
     ReadRegStr $R0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "UninstallString"
-    StrCmp $R0 "" done
+    StrCmp $R0 "" legacy
+    StrCpy $alreadyInstalled "true"
+    ReadRegStr $R1 HKLM "Software\${APP_NAME}\Main" ""
+    StrCmp $R1 "" 0 ownpath
+        Call GetUninstallDirectory
+        StrCpy $R1 $R0
+    ownpath:
+        StrCpy $INSTDIR $R1
 
-    MessageBox MB_YESNOCANCEL|MB_ICONQUESTION \
-        "${APP_NAME} is already installed.$\n$\nClick YES to Reinstall$\nClick NO to Remove$\nClick CANCEL to abort installation" \
-        IDYES repair \
-        IDNO remove
-    Abort
-
-    repair:
-        StrCpy $alreadyInstalled "true"
-        Goto done
-
-    remove:
-        ExecWait '"$INSTDIR\Uninstall.exe" /S _?=$INSTDIR'
-        MessageBox MB_OK "${APP_NAME} has been uninstalled."
-        Delete "$INSTDIR\Uninstall.exe"
-        RMDir "$INSTDIR"
-        Quit
+    legacy:
+        ReadRegStr $legacyInstallDir HKLM "Software\OpenVR-SpaceOverride\Main" ""
+        StrCmp $legacyInstallDir "" 0 done
+        ReadRegStr $R0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenVR-SpaceOverride" "UninstallString"
+        StrCmp $R0 "" done
+        Call GetUninstallDirectory
+        StrCpy $legacyInstallDir $R0
 
     done:
 FunctionEnd
@@ -101,6 +118,12 @@ Section "Install" SecInstall
         Delete "$INSTDIR\Uninstall.exe"
     noupgrade:
 
+    StrCmp $legacyInstallDir "" nolegacy
+        DetailPrint "Replacing OpenVR-SpaceOverride in $legacyInstallDir..."
+        IfFileExists "$legacyInstallDir\Uninstall.exe" 0 nolegacy
+        ExecWait '"$legacyInstallDir\Uninstall.exe" /S _?=$legacyInstallDir'
+    nolegacy:
+
     SetOutPath "$INSTDIR"
 
     File "${FILES_DIR}\LICENSE.txt"
@@ -114,25 +137,43 @@ Section "Install" SecInstall
     SetOutPath "$INSTDIR\driver"
     File /r "${DRIVER_DIR}\*"
 
-    WriteRegStr HKLM "Software\${APP_NAME}\Main" "" $INSTDIR
-    WriteUninstaller "$INSTDIR\Uninstall.exe"
-
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayName" "${APP_NAME}"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
-
-    CreateShortCut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\OpenVR-SpaceOverride.exe"
-
+	SetOutPath "$INSTDIR"
     Var /GLOBAL vrRuntimePath
 	nsExec::ExecToStack '"$INSTDIR\OpenVR-SpaceOverride.exe" -openvrpath'
 	Pop $0
 	Pop $vrRuntimePath
 	DetailPrint "VR runtime path: $vrRuntimePath"
 
+    StrCmp $legacyInstallDir "" nolegacycleanup
+        DetailPrint "Removing previous driver registration: $legacyInstallDir\driver"
+        ExecWait '"$vrRuntimePath\bin\win64\vrpathreg.exe" removedriver "$legacyInstallDir\driver"'
+        Delete "$legacyInstallDir\Uninstall.exe"
+        RMDir "$legacyInstallDir"
+    nolegacycleanup:
+    DeleteRegKey HKLM "Software\OpenVR-SpaceOverride"
+    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenVR-SpaceOverride"
+    Delete "$SMPROGRAMS\OpenVR-SpaceOverride.lnk"
+
+    WriteRegStr HKLM "Software\${APP_NAME}\Main" "" $INSTDIR
+    WriteUninstaller "$INSTDIR\Uninstall.exe"
+
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayName" "${DISPLAY_NAME}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayVersion" "${APP_VERSION}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "Publisher" "EVSkyFall"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayIcon" "$INSTDIR\OpenVR-SpaceOverride.exe"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "URLInfoAbout" "https://github.com/EVSkyFall/OpenVR-SpaceSync"
+    WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "NoModify" 1
+    WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "NoRepair" 1
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
+
+    CreateShortCut "$SMPROGRAMS\${DISPLAY_NAME}.lnk" "$INSTDIR\OpenVR-SpaceOverride.exe"
+
     ExecWait '"$vrRuntimePath\bin\win64\vrpathreg.exe" adddriver "$INSTDIR\driver"'
 
-	SetOutPath "$INSTDIR"
 	nsExec::ExecToLog '"$INSTDIR\OpenVR-SpaceOverride.exe" -installmanifest'
+	Pop $0
 	nsExec::ExecToLog '"$INSTDIR\OpenVR-SpaceOverride.exe" -activatemultipledrivers'
+	Pop $0
 
 SectionEnd
 
@@ -142,7 +183,16 @@ SectionEnd
 Section "Uninstall"
 
 	SetOutPath "$INSTDIR"
+    Var /GLOBAL vrRuntimePath2
+	nsExec::ExecToStack '"$INSTDIR\OpenVR-SpaceOverride.exe" -openvrpath'
+	Pop $0
+	Pop $vrRuntimePath2
+	DetailPrint "VR runtime path: $vrRuntimePath2"
+
 	nsExec::ExecToLog '"$INSTDIR\OpenVR-SpaceOverride.exe" -removemanifest'
+	Pop $0
+    ExecWait '"$vrRuntimePath2\bin\win64\vrpathreg.exe" removedriver "$INSTDIR\driver"'
+    SetOutPath "$TEMP"
 
     Delete "$INSTDIR\LICENSE.txt"
 	Delete "$INSTDIR\LICENSE"
@@ -155,16 +205,9 @@ Section "Uninstall"
 
     DeleteRegKey HKLM "Software\${APP_NAME}"
     DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
-    Delete "$SMPROGRAMS\${APP_NAME}.lnk"
+    Delete "$SMPROGRAMS\${DISPLAY_NAME}.lnk"
 
+    Delete "$INSTDIR\Uninstall.exe"
     RMDir "$INSTDIR"
-
-    Var /GLOBAL vrRuntimePath2
-	nsExec::ExecToStack '"$INSTDIR\OpenVR-SpaceOverride.exe" -openvrpath'
-	Pop $0
-	Pop $vrRuntimePath2
-	DetailPrint "VR runtime path: $vrRuntimePath"
-
-    ExecWait '"$vrRuntimePath2\bin\win64\vrpathreg.exe" removedriver "$INSTDIR\driver"'
 
 SectionEnd
