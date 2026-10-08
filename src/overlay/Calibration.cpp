@@ -142,10 +142,13 @@ static std::optional<protocol::DriftState> ReadDriftState()
 	}
 }
 
+static SpaceRestoreStatus SpaceRestore;
+
 static void LogSpaceRestore(const char *result, const spacememory::Alignment &alignment = {})
 {
 	overlaylog::Write("space-restore result=", result, " yaw_deg=", alignment.rotation.y(),
 		" translation_m=", alignment.translation.norm() * 0.01);
+	SpaceRestore = { result, alignment.rotation.y(), alignment.translation.norm() * 0.01 };
 }
 
 static void PrepareSpaceRestore()
@@ -407,6 +410,7 @@ AcquireStatus GetAcquireStatus()
 		status.trackerSerial = Attempt->serial;
 		status.progress = static_cast<int>(Attempt->sampler.Store().Samples().size());
 		status.target = static_cast<int>(CalCtx.SampleCount());
+		status.tiltRecalibration = Attempt->tiltRecalibration;
 	}
 	if (!CalCtx.trackerSerial.empty())
 		status.trackerSerial = CalCtx.trackerSerial;
@@ -418,6 +422,11 @@ AcquireStatus GetAcquireStatus()
 DriverLinkStatus GetDriverLinkStatus()
 {
 	return { Driver.Connected(), Driver.LastError() };
+}
+
+SpaceRestoreStatus GetSpaceRestoreStatus()
+{
+	return SpaceRestore;
 }
 
 static void Status(const std::string &text)

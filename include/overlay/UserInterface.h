@@ -23,8 +23,20 @@ struct VRState
 	std::vector<VRDevice> devices;
 };
 
+// Reads the devices from SteamVR; the UI preview links its own version.
+VRState ReadVRState();
+
 class UserInterface
 {
 public:
+	enum class Page { Calibration, Smoothing, Settings };
+
+	void Setup();
 	void Render(bool runningInOverlay);
+	void ShowPage(Page page) { this->page = page; }
+	void ShowCalibrationProgress() { openProgress = true; }
+
+private:
+	Page page = Page::Calibration;
+	bool openProgress = false;
 };

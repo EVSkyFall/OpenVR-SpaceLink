@@ -139,11 +139,14 @@ void ApplyChaperoneBounds();
 void SendOneEuroParams();
 enum class HeadTrackerState { Unbound, Waiting, Active };
 enum class AcquireState { Off, Bound, ProfileUnreadable, NeedHands, Syncing, Searching, Calibrating, Paused };
-struct AcquireStatus { AcquireState state = AcquireState::Off; int handPairs = 0; std::string trackerSerial; int progress = 0, target = 0; };
+struct AcquireStatus { AcquireState state = AcquireState::Off; int handPairs = 0; std::string trackerSerial; int progress = 0, target = 0; bool tiltRecalibration = false; };
 struct DriverLinkStatus { bool connected = false; std::string lastError; };
+// The last space restore as logged: result is applied, same-session, basis-mismatch, not-bound, absent, read-error or profile-pending (empty before the first one).
+struct SpaceRestoreStatus { std::string result; double yawDegrees = 0, translationMeters = 0; };
 HeadTrackerState GetHeadTrackerState();
 AcquireStatus GetAcquireStatus();
 DriverLinkStatus GetDriverLinkStatus();
+SpaceRestoreStatus GetSpaceRestoreStatus();
 void CancelCalibration();
 void SetAutoAcquire(bool enabled);
 void RemoveCalibration();

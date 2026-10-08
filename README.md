@@ -1,5 +1,10 @@
 # OpenVR-SpaceLink
 
+<p align="center">
+  <img src="docs/screenshots/active.png" width="49%" alt="SpaceLink linked to the head tracker, with the alignment from the last session restored at start">
+  <img src="docs/screenshots/auto-calibrating.png" width="49%" alt="SpaceLink calibrating the head tracker it found by itself">
+</p>
+
 SpaceLink lines up an inside-out headset (Quest, Pico and similar) with your lighthouse devices, using a Vive tracker mounted on the headset. It calibrates itself with hand tracking, and it stays calibrated from one VR session to the next.
 
 - **Fast automatic calibration with hand tracking.** Turn on hand tracking (for example Virtual Desktop's hand tracking on Quest), hold your lighthouse controllers and look around. SpaceLink finds the tracker on your headset and calibrates it by itself, without a button.
@@ -41,6 +46,8 @@ If CMake can't find Vulkan, add `-DVulkan_INCLUDE_DIR=<headers>/include -DVulkan
 
 To build the installer from that output, you also need NSIS 3. Run [`dev-resources/build-installer.ps1`](dev-resources/build-installer.ps1): it stages the files from `out/build/x64-release` and runs NSIS' `makensis` on [`dev-resources/installer.nsi`](dev-resources/installer.nsi) to produce `OpenVR-SpaceLink_Installer.exe`. If `makensis` is not on your PATH, pass its location with `-Makensis <path>`.
 
+The `UiPreview` target draws the overlay's window without SteamVR, the driver or a GPU: `cmake --build out/build/x64-release --target UiPreview`, then `out/build/x64-release/UiPreview.exe <folder> [scene...]` writes one PNG per scene (the screenshots above are `active` and `auto-calibrating` in `docs/screenshots`), and `UiPreview.exe --check` clicks through every control and reports what still works.
+
 ## Automatic calibration with hand tracking
 
 While no head tracker is bound, SpaceLink looks for it by itself, from the moment it starts until it succeeds. All it needs from you:
@@ -54,11 +61,11 @@ SpaceLink pairs each tracked hand with the lighthouse controller held in it and 
 - `Head tracker found: <serial>. Look around naturally for a few seconds to finish.`
 - `Head tracker ready: <serial>.`
 
-The status line on the Calibration tab shows which step it is on.
+The Calibration page shows which step it is on.
 
 The automatic run is tuned to be fast and rough. When you want a careful calibration, press **Calibrate** and move your head as the progress window asks. This works any time, even in the middle of an automatic run.
 
-The search is controlled by **Find head tracker automatically** on the Settings tab, which is on by default. Turn it off to stop the search.
+The search is controlled by **Find head tracker automatically** on the Settings page, which is on by default. Turn it off to stop the search.
 
 Limitations:
 
@@ -70,11 +77,11 @@ Limitations:
 Once a tracker is calibrated as your head tracker, it stays bound until you press **Remove Calibration**, whatever happens in between: the tracker turned off or lost tracking, SteamVR or SpaceLink restarted, or a calibration failed or was cancelled.
 
 - The calibration is saved, and the bound tracker is used as soon as VR starts. There is nothing to search for and nothing to press.
-- When VR starts again, SpaceLink restores how your lighthouse space and your headset's own tracking space lined up at the end of your last session. If the headset's coordinate system is unchanged (for example, the same Quest boundary), VR starts already aligned, even before the tracker is tracking. If it did change, everything lines up as soon as the tracker tracks.
+- When VR starts again, SpaceLink restores how your lighthouse space and your headset's own tracking space lined up at the end of your last session. If the headset's coordinate system is unchanged (for example, the same Quest boundary), VR starts already aligned, even before the tracker is tracking. If it did change, everything lines up as soon as the tracker tracks. The Calibration page shows whether the alignment was restored this time.
 - While the bound tracker is not tracking, the headset falls back to its own tracking with the last correction and picks the tracker up again as soon as it tracks. With **Fallback to SLAM** off, headset tracking pauses instead.
 - **Calibrate** with a bound tracker recalibrates that same tracker. It never switches to another one, and it waits if the tracker isn't tracking yet.
 - A manual calibration never gives up on its own: tracking interruptions pause it, and it keeps collecting until the result is good. **Cancel** in the progress window stops it, and the previous calibration stays in place.
-- If the head tracker ends up at a different angle on the headset than when it was calibrated, for example when you put it back on after charging, SpaceLink notices that the headset tilt it computes from the tracker no longer matches the headset's own. It switches the headset back to its own tracking right away and recalibrates the same tracker while you look around, and SteamVR shows `Head tracker moved on the headset. Look around naturally for a few seconds to recalibrate.` and then `Head tracker ready: <serial>.` The tracker can sit at any angle once it is calibrated, and small shifts of a few degrees are left alone. If you cancel this recalibration, SpaceLink doesn't try again until the calibration changes or SteamVR restarts.
+- If the head tracker ends up at a different angle on the headset than when it was calibrated, for example when you put it back on after charging, SpaceLink notices that the headset tilt it computes from the tracker no longer matches the headset's own. It switches the headset back to its own tracking right away and recalibrates the same tracker while you look around, and SteamVR shows `Head tracker moved on the headset. Look around naturally for a few seconds to recalibrate.` and then `Head tracker ready: <serial>.` The Calibration page shows Recalibrating meanwhile. The tracker can sit at any angle once it is calibrated, and small shifts of a few degrees are left alone. If you cancel this recalibration (**Show Progress**, then **Cancel**), SpaceLink doesn't try again until the calibration changes or SteamVR restarts.
 
 **Remove Calibration** starts over. With **Find head tracker automatically** on, SpaceLink searches again and finds the same tracker; turn the setting off if you want it to stop.
 
@@ -97,7 +104,7 @@ These results were reported for OpenVR-SpaceOverride and cover the tracker-drive
 
 ### The automatic search doesn't find my tracker
 
-The status line on the Calibration tab says what SpaceLink is waiting for. Make sure hand tracking is on and you hold your lighthouse controllers in the tracked hands, move your hands around a little, and look around. The tracker has to be rigidly mounted on the headset; one clearly below your head, such as a chest tracker, is not picked. If you can't use hand tracking, press **Calibrate** instead.
+The Calibration page says what SpaceLink is waiting for. Make sure hand tracking is on and you hold your lighthouse controllers in the tracked hands, move your hands around a little, and look around. The tracker has to be rigidly mounted on the headset; one clearly below your head, such as a chest tracker, is not picked. If you can't use hand tracking, press **Calibrate** instead.
 
 ### My controllers jump, then settle back
 
@@ -127,7 +134,7 @@ No, you can have both installed. They solve the alignment problem differently, a
 
 ### How do I stop the automatic search?
 
-Turn off **Find head tracker automatically** on the Settings tab. **Remove Calibration** alone starts over, and with the setting on, SpaceLink finds the same tracker again.
+Turn off **Find head tracker automatically** on the Settings page. **Remove Calibration** alone starts over, and with the setting on, SpaceLink finds the same tracker again.
 
 ### Can wireless latency affect the pose?
 

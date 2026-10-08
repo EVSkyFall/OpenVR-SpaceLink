@@ -2,5 +2,13 @@
 
 #pragma once
 
-const unsigned int DroidSans_compressed_size = 134345;
-extern const unsigned int DroidSans_compressed_data[134348 / 4];
+#include <cstddef>
+
+// Built from resources/fonts by CMake (cmake/EmbedFile.cmake).
+#define EMBEDDED_FONT(name) extern const unsigned char name[]; extern const std::size_t name##_size;
+EMBEDDED_FONT(Font_Geist_Regular)
+EMBEDDED_FONT(Font_Geist_Medium)
+EMBEDDED_FONT(Font_Geist_SemiBold)
+EMBEDDED_FONT(Font_GeistMono_Regular)
+EMBEDDED_FONT(Font_Phosphor)
+#undef EMBEDDED_FONT
