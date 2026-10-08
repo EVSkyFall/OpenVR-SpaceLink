@@ -122,7 +122,7 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 	VR_INIT_SERVER_DRIVER_CONTEXT(pDriverContext);
 
 	OpenLogFile();
-	LOG("OpenVR-SpaceOverride " SPACECAL_VERSION_STRING " loaded");
+	LOG("OpenVR-SpaceSync " SPACECAL_VERSION_STRING " loaded");
 
 	LARGE_INTEGER counter{};
 	FILETIME timestamp{};
@@ -160,7 +160,7 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 
 void ServerTrackedDeviceProvider::Cleanup()
 {
-	LOG("OpenVR-SpaceOverride unloaded");
+	LOG("OpenVR-SpaceSync unloaded");
 	CloseLogFile();
 
 	TRACE("ServerTrackedDeviceProvider::Cleanup()");
