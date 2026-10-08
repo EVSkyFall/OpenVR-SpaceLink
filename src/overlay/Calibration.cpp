@@ -352,8 +352,8 @@ void CancelCalibration()
 {
 	if (Attempt && !Attempt->automatic)
 	{
-		if (Attempt->tiltRecalibration)
-			TiltRecalibration.Cancel(CalCtx, LastSpaceSession);
+		// Any user cancel holds tilt recalibration, also when Calibrate replaced a running one.
+		TiltRecalibration.Cancel(CalCtx, LastSpaceSession);
 		EndAttempt("cancel", "user");
 	}
 }
