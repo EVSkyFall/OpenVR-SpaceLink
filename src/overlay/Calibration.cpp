@@ -37,11 +37,15 @@ static double NextEvaluation = 0, NextSearchLog = 0, NextSolve = 0, LastApply = 
 static std::string SolveSerial;
 static size_t SolveKeyframes = 0;
 static bool SolveAutomatic = false;
+static const char *SolveMode = "manual";
 static bool RawPoseReady = false;
 static bool SpaceLinkPending = false;
 static uint64_t LastSpaceSession = 0, ProfilePendingSession = 0;
 static double LastSpacePoll = -1, LastSpaceWrite = 0;
 static std::optional<spacememory::StoredAlignment> LatestSpace, WrittenSpace;
+static spacememory::TiltRecalibration TiltRecalibration;
+static double LastBoundLog = 0;
+static void StartCalibration(bool tiltRecalibration);
 static vr::VRNotificationId (*ShowCalibrationNotification)(const char *, vr::EVRNotificationType) = nullptr;
 static void (*RemoveCalibrationNotification)(vr::VRNotificationId) = nullptr;
 
@@ -233,9 +237,22 @@ static void PollSpaceMemory(double time)
 			WrittenSpace.reset();
 			LogSpaceRestore("read-error");
 		}
+		if (state->enabled && time - LastBoundLog >= 60.0)
+		{
+			overlaylog::Write("bound-status tilt_deg=", state->tiltMismatchDeg, " tilt_samples=", state->tiltSamples,
+				" updates=", state->updatesSinceChange, " drift_valid=", state->valid);
+			LastBoundLog = time;
+		}
+		if (TiltRecalibration.Update(*state, CalCtx, Attempt.has_value()))
+		{
+			overlaylog::Write("tilt-mismatch deg=", state->tiltMismatchDeg, " samples=", state->tiltSamples, " action=recalibrate");
+			StartCalibration(true);
+		}
 		if (auto capture = spacememory::Capture(*state, CalCtx))
 			LatestSpace = std::move(capture);
 	}
+	else
+		TiltRecalibration.ResetPolls();
 	WriteSpaceMemory(false);
 }
 
@@ -288,7 +305,7 @@ static void RemoveFoundNotification()
 	CalCtx.notificationId = 0;
 }
 
-static const char *AttemptMode() { return Attempt && Attempt->automatic ? "automatic" : "manual"; }
+static const char *AttemptMode() { return Attempt ? CalibrationAttemptMode(*Attempt) : "manual"; }
 
 static void LogAttemptEnd(const char *event, const char *reason)
 {
@@ -314,6 +331,7 @@ void CalibrationContext::Clear()
 		LatestSpace.reset();
 		WrittenSpace.reset();
 		DeleteLastSpace();
+		TiltRecalibration = {};
 		LogAttemptEnd("cancel", "removed");
 		RemoveCalibrationState(*this, Attempt, Acquisition);
 		Acquisition.Refresh(Devices);
@@ -333,7 +351,11 @@ void RemoveCalibration()
 void CancelCalibration()
 {
 	if (Attempt && !Attempt->automatic)
+	{
+		if (Attempt->tiltRecalibration)
+			TiltRecalibration.Cancel(CalCtx, LastSpaceSession);
 		EndAttempt("cancel", "user");
+	}
 }
 
 static void ApplyAutoAcquire(bool enabled)
@@ -430,12 +452,13 @@ static void ChooseTracker(uint32_t id)
 	Status(WaitingForTracker(Attempt->serial));
 }
 
-void StartCalibration()
+static void StartCalibration(bool tiltRecalibration)
 {
 	if (Attempt)
 		EndAttempt("cancel", "manual-request");
 	++Generation;
 	Attempt.emplace();
+	Attempt->tiltRecalibration = tiltRecalibration;
 	CalCtx.messages.clear();
 	CalCtx.wantedUpdateInterval = 0;
 	Detection = {};
@@ -453,7 +476,17 @@ void StartCalibration()
 		CalCtx.state = CalibrationState::Begin;
 		Status("Waiting for a head tracker.");
 	}
-	overlaylog::Write("attempt-start attempt=", Generation, " mode=manual serial=", std::quoted(Attempt->serial), " seed=0");
+	overlaylog::Write("attempt-start attempt=", Generation, " mode=", AttemptMode(), " serial=", std::quoted(Attempt->serial), " seed=0");
+	if (tiltRecalibration && ShowCalibrationNotification)
+	{
+		auto notice = RecalibrationNotice();
+		CalCtx.notificationId = ShowCalibrationNotification(notice.text.c_str(), notice.type);
+	}
+}
+
+void StartCalibration()
+{
+	StartCalibration(false);
 }
 
 static bool AutoEligible()
@@ -543,7 +576,7 @@ static void TickManualDetection(double time)
 		break;
 	case ManualDetection::Event::Selected:
 		Attempt->serial = result.serial;
-		overlaylog::Write("tracker-selected attempt=", Generation, " serial=", std::quoted(result.serial));
+		overlaylog::Write("tracker-selected attempt=", Generation, " mode=", AttemptMode(), " serial=", std::quoted(result.serial));
 		ChooseTracker(result.id);
 		break;
 	case ManualDetection::Event::Collecting:
@@ -559,7 +592,7 @@ static acquisition::CalibrationSolution ReceiveSolve(bool current)
 	{
 		auto result = CalibrationWork.get();
 		bool success = SolveAutomatic ? acquisition::AutomaticCalibrationSucceeded(result) : result.holdout.rms <= 0.10;
-		overlaylog::Write("solve attempt=", SolveGeneration, " mode=", SolveAutomatic ? "automatic" : "manual",
+		overlaylog::Write("solve attempt=", SolveGeneration, " mode=", SolveMode,
 			" serial=", std::quoted(SolveSerial), " keyframes=", SolveKeyframes, " rms_m=", result.holdout.rms,
 			" p90_m=", result.holdout.p90, " rotation_deg=", result.rotationError.median / acquisition::Degrees,
 			" success=", success, " result=", current ? (success ? "commit" : "collecting") : "stale");
@@ -567,7 +600,7 @@ static acquisition::CalibrationSolution ReceiveSolve(bool current)
 	}
 	catch (const std::exception &error)
 	{
-		overlaylog::Write("solve attempt=", SolveGeneration, " mode=", SolveAutomatic ? "automatic" : "manual",
+		overlaylog::Write("solve attempt=", SolveGeneration, " mode=", SolveMode,
 			" serial=", std::quoted(SolveSerial), " keyframes=", SolveKeyframes, " result=error error=", std::quoted(error.what()));
 		throw;
 	}
@@ -596,7 +629,7 @@ static void TickSampling(double time)
 	}
 	else if (event == acquisition::SampleEvent::SegmentRestarted)
 	{
-		overlaylog::Write("segment-restart attempt=", Generation, " serial=", std::quoted(Attempt->serial), " segment=", Attempt->sampler.Segment(), " reason=headset-tracking-jump-or-return");
+		overlaylog::Write("segment-restart attempt=", Generation, " mode=", AttemptMode(), " serial=", std::quoted(Attempt->serial), " segment=", Attempt->sampler.Segment(), " reason=headset-tracking-jump-or-return");
 		Attempt->lastSolveCount = 0;
 		Attempt->rigiditySampler.Clear();
 		Attempt->paused = true;
@@ -639,15 +672,16 @@ static void TickSampling(double time)
 				if (success)
 				{
 					bool automatic = Attempt->automatic;
+					bool notify = automatic || Attempt->tiltRecalibration;
 					CommitAttempt(CalCtx, *Attempt);
 					SaveProfile(CalCtx);
 					EndAttempt("commit", "solve-succeeded");
-					if (automatic && ShowCalibrationNotification)
+					if (notify && ShowCalibrationNotification)
 					{
 						auto notice = ReadyNotice(CalCtx);
 						ShowCalibrationNotification(notice.text.c_str(), notice.type);
 					}
-					else if (!automatic)
+					if (!automatic)
 					{
 						CalCtx.messages.clear();
 						CalCtx.Log("Calibration finished.\n");
@@ -682,8 +716,9 @@ static void TickSampling(double time)
 		SolveSegment = Attempt->sampler.Segment();
 		SolveSerial = Attempt->serial;
 		SolveAutomatic = Attempt->automatic;
+		SolveMode = AttemptMode();
 		SolveKeyframes = store.Samples().size();
-		overlaylog::Write("solve-start attempt=", SolveGeneration, " serial=", std::quoted(SolveSerial), " keyframes=", SolveKeyframes);
+		overlaylog::Write("solve-start attempt=", SolveGeneration, " mode=", SolveMode, " serial=", std::quoted(SolveSerial), " keyframes=", SolveKeyframes);
 		auto samples = Attempt->sampler.Snapshot();
 		double scale = Attempt->modelScale;
 		try

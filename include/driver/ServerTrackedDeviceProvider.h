@@ -5,6 +5,7 @@
 #include "IPCServer.h"
 #include "OneEuroFilter.h"
 #include "KalmanFilter.h"
+#include "TiltMonitor.h"
 
 #include <openvr_driver.h>
 
@@ -91,6 +92,9 @@ private:
 		oneeuro::Quat rotationFilter;
 		oneeuro::Vec3 translationFilter;
 	} drift;
+
+	tilt::Monitor tiltMonitor;
+	LARGE_INTEGER tiltLastUpdate = {};
 
 	struct HeadFilter
 	{

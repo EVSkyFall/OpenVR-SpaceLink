@@ -119,6 +119,16 @@ CalibrationNotice FoundNotice(const std::string &serial)
 	return { "Head tracker found: " + serial + ". Look around naturally for a few seconds to finish.", vr::EVRNotificationType_Persistent };
 }
 
+CalibrationNotice RecalibrationNotice()
+{
+	return { "Head tracker moved on the headset. Look around naturally for a few seconds to recalibrate.", vr::EVRNotificationType_Persistent };
+}
+
+const char *CalibrationAttemptMode(const CalibrationAttempt &attempt)
+{
+	return attempt.tiltRecalibration ? "recalibrate" : attempt.automatic ? "automatic" : "manual";
+}
+
 CalibrationNotice ReadyNotice(const CalibrationContext &committed)
 {
 	return { "Head tracker ready: " + committed.trackerSerial + ".", vr::EVRNotificationType_Transient };

@@ -59,6 +59,37 @@ static bool Close(const Basis &a, const Basis &b)
 		&& std::abs(a.calibrationScale - b.calibrationScale) <= 1e-6 && std::abs(a.hmdScale - b.hmdScale) <= 1e-6;
 }
 
+static bool Same(const Basis &a, const Basis &b)
+{
+	return a.trackerSerial == b.trackerSerial
+		&& Quaternion(a.calibrationRotation).coeffs() == Quaternion(b.calibrationRotation).coeffs()
+		&& Vector(a.calibrationTranslation) == Vector(b.calibrationTranslation)
+		&& Quaternion(a.offsetRotation).coeffs() == Quaternion(b.offsetRotation).coeffs()
+		&& Vector(a.offsetTranslation) == Vector(b.offsetTranslation)
+		&& a.calibrationScale == b.calibrationScale && a.hmdScale == b.hmdScale;
+}
+
+bool TiltRecalibration::Update(const protocol::DriftState &state, const CalibrationContext &profile, bool attempting)
+{
+	const auto basis = ProfileBasis(profile);
+	if (cancelledBasis && (cancelledSession != state.session || !Same(*cancelledBasis, basis)))
+		cancelledBasis.reset();
+	const bool mismatch = !cancelledBasis && !attempting && state.enabled && profile.validProfile
+		&& profile.validRelativeOffset && !profile.trackerSerial.empty() && state.tiltSamples >= 30 && state.tiltMismatchDeg >= 10.0;
+	const bool trigger = mismatch && previousMismatch && previousSession == state.session && previousBasis && Same(*previousBasis, basis);
+	previousMismatch = mismatch;
+	previousSession = state.session;
+	previousBasis = basis;
+	return trigger;
+}
+
+void TiltRecalibration::Cancel(const CalibrationContext &profile, uint64_t session)
+{
+	cancelledBasis = ProfileBasis(profile);
+	cancelledSession = session;
+	ResetPolls();
+}
+
 Alignment Fold(const protocol::DriftState &state)
 {
 	const Eigen::Quaterniond inverse = Quaternion(state.rotation).inverse();
@@ -80,6 +111,8 @@ Alignment Fold(const protocol::DriftState &state)
 std::optional<StoredAlignment> Capture(const protocol::DriftState &state, const CalibrationContext &profile)
 {
 	if (!state.valid || !state.enabled || state.native || state.updatesSinceChange < 120 || !Bound(profile) || !state.session)
+		return std::nullopt;
+	if (state.tiltSamples < 30 || !(state.tiltMismatchDeg < 5.0))
 		return std::nullopt;
 	Basis basis{ state.calibrationRotation, state.offsetRotation, state.calibrationTranslation, state.offsetTranslation,
 		state.calibrationScale, state.hmdScale, profile.trackerSerial };

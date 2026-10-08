@@ -14,6 +14,7 @@ struct CalibrationAttempt
 	std::string serial, trackingSystem, hmdSerial, statusLine;
 	uint32_t id = vr::k_unTrackedDeviceIndexInvalid;
 	bool automatic = false;
+	bool tiltRecalibration = false;
 	bool paused = false;
 	acquisition::Sampler sampler, rigiditySampler;
 	Eigen::Matrix3d confirmationRotation = Eigen::Matrix3d::Identity();
@@ -42,6 +43,8 @@ struct CalibrationNotice
 	vr::EVRNotificationType type;
 };
 CalibrationNotice FoundNotice(const std::string &serial);
+CalibrationNotice RecalibrationNotice();
+const char *CalibrationAttemptMode(const CalibrationAttempt &attempt);
 CalibrationNotice ReadyNotice(const CalibrationContext &committed);
 
 struct PersistenceState
