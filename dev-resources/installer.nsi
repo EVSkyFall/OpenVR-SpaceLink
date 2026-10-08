@@ -9,8 +9,8 @@
 
 !define APP_VERSION "1.0.0"
 !define APP_VERSION_META "1.0.0.0"
-!define APP_NAME "OpenVR-SpaceSync"
-!define DISPLAY_NAME "SpaceSync"
+!define APP_NAME "OpenVR-SpaceLink"
+!define DISPLAY_NAME "SpaceLink"
 
 !define INSTALL_DIR "$PROGRAMFILES64\${APP_NAME}"
 !ifndef FILES_DIR
@@ -36,7 +36,7 @@ ShowInstDetails show
 VIProductVersion "${APP_VERSION_META}"
 VIAddVersionKey /LANG=1033 "ProductName" "${DISPLAY_NAME}"
 VIAddVersionKey /LANG=1033 "FileDescription" "${DISPLAY_NAME} Installer"
-VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Nyabsi; SpaceSync changes Copyright (c) 2026 EVSkyFall"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Nyabsi; SpaceLink changes Copyright (c) 2026 EVSkyFall"
 VIAddVersionKey /LANG=1033 "FileVersion" "${APP_VERSION_META}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${APP_VERSION}"
 
@@ -161,7 +161,7 @@ Section "Install" SecInstall
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayVersion" "${APP_VERSION}"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "Publisher" "EVSkyFall"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayIcon" "$INSTDIR\OpenVR-SpaceOverride.exe"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "URLInfoAbout" "https://github.com/EVSkyFall/OpenVR-SpaceSync"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "URLInfoAbout" "https://github.com/EVSkyFall/OpenVR-SpaceLink"
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "NoModify" 1
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "NoRepair" 1
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""

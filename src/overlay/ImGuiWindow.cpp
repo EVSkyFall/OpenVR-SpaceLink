@@ -40,7 +40,7 @@ auto ImGuiWindow::Initialize(VulkanRenderer*& renderer, VrOverlay*& overlay, con
     window_ = SDL_CreateWindow(name, width, height, sdl_window_flags);
     if (window_ == nullptr) {
 #ifdef _WIN32
-        MessageBoxA(NULL, SDL_GetError(), "SpaceSync", MB_OK);
+        MessageBoxA(NULL, SDL_GetError(), "SpaceLink", MB_OK);
 #else
         printf("SDL_CreateWindow(): %s\n", SDL_GetError());
 #endif
@@ -50,7 +50,7 @@ auto ImGuiWindow::Initialize(VulkanRenderer*& renderer, VrOverlay*& overlay, con
     VkSurfaceKHR surface = {};
     if (SDL_Vulkan_CreateSurface(window_, renderer->Instance(), renderer->Allocator(), &surface) == 0) {
 #ifdef _WIN32
-        MessageBoxA(NULL, SDL_GetError(), "SpaceSync", MB_OK);
+        MessageBoxA(NULL, SDL_GetError(), "SpaceLink", MB_OK);
 #else
         printf("SDL_Vulkan_CreateSurface(): %s\n", SDL_GetError());
 #endif
