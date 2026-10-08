@@ -26,6 +26,28 @@ add_subdirectory(3rdparty)
 
 message(STATUS "ENABLE_VULKAN_VALIDATION = ${ENABLE_VULKAN_VALIDATION}")
 
+# The UI fonts are compiled in as byte arrays named Font_<file name>, so nothing is loaded at runtime.
+add_library(EmbeddedFonts STATIC)
+foreach(font
+    geist/Geist-Regular.ttf
+    geist/Geist-Medium.ttf
+    geist/Geist-SemiBold.ttf
+    geist/GeistMono-Regular.ttf
+    phosphor/Phosphor.ttf
+)
+    get_filename_component(name "${font}" NAME_WE)
+    string(MAKE_C_IDENTIFIER "Font_${name}" symbol)
+    set(output "${CMAKE_CURRENT_BINARY_DIR}/fonts/${symbol}.cpp")
+    add_custom_command(
+        OUTPUT "${output}"
+        COMMAND "${CMAKE_COMMAND}" "-DINPUT=${CMAKE_SOURCE_DIR}/resources/fonts/${font}" "-DOUTPUT=${output}" "-DSYMBOL=${symbol}"
+            -P "${CMAKE_SOURCE_DIR}/cmake/EmbedFile.cmake"
+        DEPENDS "${CMAKE_SOURCE_DIR}/resources/fonts/${font}" "${CMAKE_SOURCE_DIR}/cmake/EmbedFile.cmake"
+        VERBATIM
+    )
+    target_sources(EmbeddedFonts PRIVATE "${output}")
+endforeach()
+
 add_executable(OpenVR-SpaceOverride
     "src/overlay/Main.cpp"
     "src/overlay/VulkanRenderer.cpp"
@@ -34,7 +56,8 @@ add_executable(OpenVR-SpaceOverride
     "src/overlay/Configuration.cpp"
     "src/overlay/IPCClient.cpp"
     "src/overlay/UserInterface.cpp"
-    "src/overlay/EmbeddedFiles.cpp"
+    "src/overlay/SystemFonts.cpp"
+    "src/overlay/VRState.cpp"
 )
 
 target_compile_features(OpenVR-SpaceOverride PUBLIC cxx_std_20)
@@ -71,6 +94,7 @@ target_link_libraries(OpenVR-SpaceOverride
         ImGui
         Eigen
         PicoJSON
+        EmbeddedFonts
 )
 
 add_library(driver_spaceoverride SHARED
@@ -130,3 +154,34 @@ if (MSVC)
 endif()
 enable_testing()
 add_test(NAME SpaceOverrideTests COMMAND SpaceOverrideTests)
+
+# Renders the overlay UI to PNGs without SteamVR or a GPU (UiPreview <output folder> [scene...]),
+# and UiPreview --check clicks through every control. It builds its own Dear ImGui with the test engine
+# hooks, which is how the checks find items on screen.
+add_executable(UiPreview EXCLUDE_FROM_ALL
+	"tools/UiPreview/UiPreview.cpp"
+	"tools/UiPreview/Checks.cpp"
+	"tools/UiPreview/PreviewState.cpp"
+	"tools/UiPreview/SoftwareRenderer.cpp"
+	"src/overlay/UserInterface.cpp"
+	"src/overlay/SystemFonts.cpp"
+	"${CMAKE_SOURCE_DIR}/3rdparty/ImGui/imgui.cpp"
+	"${CMAKE_SOURCE_DIR}/3rdparty/ImGui/imgui_draw.cpp"
+	"${CMAKE_SOURCE_DIR}/3rdparty/ImGui/imgui_tables.cpp"
+	"${CMAKE_SOURCE_DIR}/3rdparty/ImGui/imgui_widgets.cpp"
+)
+target_include_directories(UiPreview PRIVATE
+	"${CMAKE_SOURCE_DIR}/include/overlay"
+	"${CMAKE_SOURCE_DIR}/include/shared"
+	"${CMAKE_SOURCE_DIR}/3rdparty/ImGui"
+	"${OpenVR_INCLUDE_DIR}"
+)
+target_link_libraries(UiPreview PRIVATE SDL3::SDL3 Eigen PicoJSON EmbeddedFonts)
+target_compile_definitions(UiPreview PRIVATE
+	IMGUI_ENABLE_TEST_ENGINE
+	_HAS_DEPRECATED_NEGATORS=1
+	_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS
+)
+if (MSVC)
+	target_compile_options(UiPreview PRIVATE /bigobj)
+endif()
