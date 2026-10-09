@@ -35,6 +35,16 @@ private:
 	bool previousMismatch = false;
 };
 
+class SpaceRealign
+{
+public:
+	bool Update(const protocol::DriftState &state, const CalibrationContext &profile, bool attempting);
+	void ResetPolls() { previous.reset(); }
+
+private:
+	std::optional<protocol::DriftState> previous;
+};
+
 struct StoredAlignment
 {
 	Alignment alignment;
@@ -54,6 +64,7 @@ struct RestorePreparation
 	bool consumeLink, claimSession, logProfilePending;
 };
 
+double DriftYawDegrees(const vr::HmdQuaternion_t &rotation);
 Alignment Fold(const protocol::DriftState &state);
 std::optional<StoredAlignment> Capture(const protocol::DriftState &state, const CalibrationContext &profile);
 Restoration Restore(const std::optional<StoredAlignment> &stored, const CalibrationContext &profile, uint64_t currentSession);
