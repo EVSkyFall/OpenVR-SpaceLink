@@ -44,8 +44,10 @@ static uint64_t LastSpaceSession = 0, ProfilePendingSession = 0;
 static double LastSpacePoll = -1, LastSpaceWrite = 0;
 static std::optional<spacememory::StoredAlignment> LatestSpace, WrittenSpace;
 static spacememory::TiltRecalibration TiltRecalibration;
+static spacememory::SpaceRealign SpaceRealign;
 static double LastBoundLog = 0;
 static void StartCalibration(bool tiltRecalibration);
+static void ApplyCommittedState();
 static vr::VRNotificationId (*ShowCalibrationNotification)(const char *, vr::EVRNotificationType) = nullptr;
 static void (*RemoveCalibrationNotification)(vr::VRNotificationId) = nullptr;
 
@@ -243,7 +245,8 @@ static void PollSpaceMemory(double time)
 		if (state->enabled && time - LastBoundLog >= 60.0)
 		{
 			overlaylog::Write("bound-status tilt_deg=", state->tiltMismatchDeg, " tilt_samples=", state->tiltSamples,
-				" updates=", state->updatesSinceChange, " drift_valid=", state->valid);
+				" updates=", state->updatesSinceChange, " drift_valid=", state->valid,
+				" drift_yaw_deg=", spacememory::DriftYawDegrees(state->rotation), " drift_m=", Eigen::Map<const Eigen::Vector3d>(state->translation.v).norm());
 			LastBoundLog = time;
 		}
 		if (TiltRecalibration.Update(*state, CalCtx, Attempt.has_value()))
@@ -251,11 +254,24 @@ static void PollSpaceMemory(double time)
 			overlaylog::Write("tilt-mismatch deg=", state->tiltMismatchDeg, " samples=", state->tiltSamples, " action=recalibrate");
 			StartCalibration(true);
 		}
+		if (SpaceRealign.Update(*state, CalCtx, Attempt.has_value()))
+		{
+			const auto alignment = spacememory::Fold(*state);
+			CalCtx.calibratedRotation = alignment.rotation;
+			CalCtx.calibratedTranslation = alignment.translation;
+			SaveProfile(CalCtx);
+			ApplyCommittedState();
+			overlaylog::Write("space-realign yaw_deg=", spacememory::DriftYawDegrees(state->rotation),
+				" translation_m=", Eigen::Map<const Eigen::Vector3d>(state->translation.v).norm());
+		}
 		if (auto capture = spacememory::Capture(*state, CalCtx))
 			LatestSpace = std::move(capture);
 	}
 	else
+	{
 		TiltRecalibration.ResetPolls();
+		SpaceRealign.ResetPolls();
+	}
 	WriteSpaceMemory(false);
 }
 
@@ -335,6 +351,7 @@ void CalibrationContext::Clear()
 		WrittenSpace.reset();
 		DeleteLastSpace();
 		TiltRecalibration = {};
+		SpaceRealign = {};
 		LogAttemptEnd("cancel", "removed");
 		RemoveCalibrationState(*this, Attempt, Acquisition);
 		Acquisition.Refresh(Devices);

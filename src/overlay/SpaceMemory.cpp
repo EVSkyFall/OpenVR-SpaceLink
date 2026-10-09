@@ -90,6 +90,35 @@ void TiltRecalibration::Cancel(const CalibrationContext &profile, uint64_t sessi
 	ResetPolls();
 }
 
+double DriftYawDegrees(const vr::HmdQuaternion_t &rotation)
+{
+	const double yaw = std::remainder(2.0 * std::atan2(rotation.y, rotation.w) * 180.0 / EIGEN_PI, 360.0);
+	return yaw == -180.0 ? 180.0 : yaw;
+}
+
+bool SpaceRealign::Update(const protocol::DriftState &state, const CalibrationContext &profile, bool attempting)
+{
+	const Basis basis{ state.calibrationRotation, state.offsetRotation, state.calibrationTranslation, state.offsetTranslation,
+		state.calibrationScale, state.hmdScale, profile.trackerSerial };
+	const double yaw = DriftYawDegrees(state.rotation);
+	const bool eligible = state.valid && state.enabled && !state.native && !attempting
+		&& state.updatesSinceChange >= 60 && state.tiltSamples >= 30 && state.tiltMismatchDeg < 5.0
+		&& Close(basis, ProfileBasis(profile)) && (std::abs(yaw) >= 2.0 || Vector(state.translation).norm() >= 0.05);
+	if (!eligible)
+	{
+		ResetPolls();
+		return false;
+	}
+	const bool trigger = previous && previous->session == state.session
+		&& std::abs(std::remainder(yaw - DriftYawDegrees(previous->rotation), 360.0)) <= 0.5
+		&& (Vector(state.translation) - Vector(previous->translation)).norm() <= 0.02;
+	if (trigger)
+		ResetPolls();
+	else
+		previous = state;
+	return trigger;
+}
+
 Alignment Fold(const protocol::DriftState &state)
 {
 	const Eigen::Quaterniond inverse = Quaternion(state.rotation).inverse();

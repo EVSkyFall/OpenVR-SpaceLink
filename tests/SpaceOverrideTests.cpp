@@ -1887,6 +1887,170 @@ static void Scenario36()
 		"tilt commit must use the existing ready notice");
 }
 
+static void Scenario37()
+{
+	auto profile = Profile();
+	auto state = DriftState(profile);
+	state.rotation = VrQ(Eigen::Quaterniond(Rotation(0, 40 * Degrees)));
+	state.translation = { 1.8, 0, 2.4 };
+	state.updatesSinceChange = 60;
+	spacememory::SpaceRealign policy;
+	Check(!policy.Update(state, profile, false), "a single 40 degree and 3 metre reading must wait");
+	Check(policy.Update(state, profile, false), "two stable 40 degree and 3 metre readings must realign");
+	const Eigen::Quaterniond rawRotation(Rotation(0.23, -0.71, 0.12));
+	const Eigen::Vector3d rawPosition(0.4, 1.65, -0.9);
+	const Eigen::Quaterniond lighthouseRotation = Q(state.calibrationRotation).inverse() * Q(state.rotation) * rawRotation;
+	const Eigen::Vector3d lighthousePosition = Q(state.calibrationRotation).inverse()
+		* (Q(state.rotation) * rawPosition + V(state.translation) - V(state.calibrationTranslation)) / state.calibrationScale;
+	const auto folded = spacememory::Fold(state);
+	profile.calibratedRotation = folded.rotation;
+	profile.calibratedTranslation = folded.translation;
+	const auto packet = DesiredState(Devices(), profile, false).front().setHmdTracker;
+	Check(((Q(packet.calibrationRotation) * lighthouseRotation).toRotationMatrix() - rawRotation.toRotationMatrix()).norm() < 1e-12,
+		"40 degree fold must map lighthouse orientation onto the raw headset orientation");
+	Check((Q(packet.calibrationRotation) * (packet.calibrationScale * lighthousePosition) + V(packet.calibrationTranslation) - rawPosition).norm() < 1e-12,
+		"3 metre fold must map lighthouse position onto the raw headset position");
+	state = DriftState(profile);
+	state.updatesSinceChange = 0;
+	Check(!policy.Update(state, profile, false) && !policy.Update(state, profile, false), "post-fold zero update readings must not realign");
+	state.updatesSinceChange = 60;
+	Check(!policy.Update(state, profile, false), "post-fold realignment must start with fresh evidence");
+	Check(policy.Update(state, profile, false), "fresh stable evidence must allow another realignment mid-session");
+	Check(!policy.Update(state, profile, false), "a successful realignment must consume its poll pair");
+}
+
+static void Scenario38()
+{
+	const auto profile = Profile();
+	auto state = DriftState(profile);
+	state.updatesSinceChange = 60;
+	state.tiltMismatchDeg = 4.999;
+	auto rejects = [&](const protocol::DriftState &changed, bool attempting, const char *message) {
+		spacememory::SpaceRealign policy;
+		policy.Update(state, profile, false);
+		Check(!policy.Update(changed, profile, attempting) && !policy.Update(changed, profile, attempting), message);
+		Check(!policy.Update(state, profile, false), "an ineligible reading must break the realignment poll pair");
+		Check(policy.Update(state, profile, false), "eligibility returning must allow a fresh realignment pair");
+	};
+	for (const auto &test : std::vector<std::pair<const char *, std::function<void(protocol::DriftState &)>>>{
+		{ "invalid drift must not realign", [](auto &s) { s.valid = false; } },
+		{ "disabled echo must not realign", [](auto &s) { s.enabled = false; } },
+		{ "native echo must not realign", [](auto &s) { s.native = true; } },
+		{ "59 drift updates must not realign", [](auto &s) { s.updatesSinceChange = 59; } },
+		{ "29 tilt samples must not realign", [](auto &s) { s.tiltSamples = 29; } },
+		{ "exactly 5 degree tilt mismatch must not realign", [](auto &s) { s.tiltMismatchDeg = 5; } },
+		{ "a moved mount must not realign", [](auto &s) { s.tiltMismatchDeg = 30; } },
+		{ "unmeasured tilt agreement must not realign", [](auto &s) { s.tiltMismatchDeg = std::numeric_limits<double>::quiet_NaN(); } } })
+	{
+		auto changed = state;
+		test.second(changed);
+		rejects(changed, false, test.first);
+	}
+	rejects(state, true, "an active calibration attempt must not realign");
+	for (size_t index = 8; index < DriftNumbers(state).size(); ++index)
+	{
+		auto changed = state;
+		*DriftNumbers(changed)[index] += 2e-6;
+		rejects(changed, false, "each echoed calibration, mount and scale component must match the profile basis");
+		changed = state;
+		*DriftNumbers(changed)[index] += 0.5e-6;
+		spacememory::SpaceRealign policy;
+		policy.Update(changed, profile, false);
+		Check(policy.Update(changed, profile, false), "realignment basis must accept the Capture Close tolerance");
+	}
+	auto changed = state;
+	changed.calibrationRotation = VrQ(Eigen::Quaterniond(-Q(state.calibrationRotation).coeffs()));
+	changed.offsetRotation = VrQ(Eigen::Quaterniond(-Q(state.offsetRotation).coeffs()));
+	spacememory::SpaceRealign policy;
+	policy.Update(changed, profile, false);
+	Check(policy.Update(changed, profile, false), "opposite quaternion signs must describe the same realignment basis");
+	auto settings = profile;
+	settings.autoAcquire = false;
+	policy.Update(state, settings, false);
+	Check(policy.Update(state, settings, false), "auto-acquisition off must still allow space realignment");
+}
+
+static void Scenario39()
+{
+	const auto profile = Profile();
+	auto triggers = [&](double yaw, const Eigen::Vector3d &translation) {
+		auto state = DriftState(profile);
+		state.updatesSinceChange = 60;
+		state.rotation = { std::cos(yaw * Degrees / 2), 0, std::sin(yaw * Degrees / 2), 0 };
+		state.translation = { translation.x(), translation.y(), translation.z() };
+		spacememory::SpaceRealign policy;
+		policy.Update(state, profile, false);
+		return policy.Update(state, profile, false);
+	};
+	Check(triggers(2.001, Eigen::Vector3d::Zero()), "yaw just above 2 degrees must realign without translation");
+	Check(triggers(-2.001, Eigen::Vector3d::Zero()), "negative yaw just beyond 2 degrees must realign");
+	Check(triggers(2, Eigen::Vector3d::Zero()), "exactly 2 degrees must realign");
+	Check(!triggers(1.999, Eigen::Vector3d::Zero()), "yaw just below 2 degrees must not realign");
+	Check(!triggers(-1.999, Eigen::Vector3d::Zero()), "negative yaw just within 2 degrees must not realign");
+	Check(triggers(0, Eigen::Vector3d(0.05001, 0, 0)), "translation just above 5 centimetres must realign without yaw");
+	Check(triggers(0, Eigen::Vector3d(0, -0.05001, 0)), "vertical translation must contribute to realignment magnitude");
+	Check(triggers(0, Eigen::Vector3d(0, 0, -0.05001)), "depth translation must contribute to realignment magnitude");
+	Check(triggers(0, Eigen::Vector3d(0.05, 0, 0)), "exactly 5 centimetres must realign");
+	Check(!triggers(0, Eigen::Vector3d(0.04999, 0, 0)), "translation just below 5 centimetres must not realign");
+	Check(!triggers(1.999, Eigen::Vector3d(0.04999, 0, 0)), "two subthreshold drift components must not add up to a trigger");
+}
+
+static void Scenario40()
+{
+	const auto profile = Profile();
+	auto state = DriftState(profile);
+	state.rotation = { 1, 0, 0, 0 };
+	state.translation = { 0.1, 0, 0 };
+	spacememory::SpaceRealign policy;
+	policy.Update(state, profile, false);
+	++state.session;
+	Check(!policy.Update(state, profile, false), "a driver session change must break the realignment pair");
+	Check(policy.Update(state, profile, false), "a new driver session must accept its own second stable reading");
+	policy.Update(state, profile, false);
+	policy.ResetPolls();
+	Check(!policy.Update(state, profile, false), "a missing drift reply must break the realignment pair");
+	Check(policy.Update(state, profile, false), "realignment must recover after a missing drift reply");
+	auto pair = [&](const protocol::DriftState &first, const protocol::DriftState &second) {
+		spacememory::SpaceRealign decision;
+		decision.Update(first, profile, false);
+		return decision.Update(second, profile, false);
+	};
+	auto changed = state;
+	changed.rotation = { std::cos(0.25 * Degrees), 0, std::sin(0.25 * Degrees), 0 };
+	Check(pair(state, changed), "exactly half a degree between polls must remain stable");
+	changed.rotation = VrQ(Eigen::Quaterniond(Rotation(0, 0.501 * Degrees)));
+	Check(!pair(state, changed), "yaw readings over half a degree apart must not realign");
+	policy.Update(state, profile, false);
+	policy.Update(changed, profile, false);
+	Check(policy.Update(changed, profile, false), "a disagreeing reading must start a new stable pair");
+	changed = state;
+	changed.translation.v[1] = 0.02;
+	Check(pair(state, changed), "exactly 2 centimetres between translation vectors must remain stable");
+	changed.translation.v[1] = 0.02001;
+	Check(!pair(state, changed), "translation vectors over 2 centimetres apart must not realign");
+	changed.translation = { 0, 0, 0.1 };
+	Check(!pair(state, changed), "equal translation magnitudes in different directions must not count as stable");
+	state.rotation = VrQ(Eigen::Quaterniond(Rotation(0, 179.8 * Degrees)));
+	changed = state;
+	changed.rotation = VrQ(Eigen::Quaterniond(Rotation(0, -179.8 * Degrees)));
+	Check(pair(state, changed), "stable yaw readings across the half-turn boundary must realign");
+	changed.rotation = VrQ(Eigen::Quaterniond(-Q(state.rotation).coeffs()));
+	Check(pair(state, changed), "a drift quaternion sign flip must remain stable");
+}
+
+static void Scenario41()
+{
+	for (double yaw : { 170.0, -170.0 })
+	{
+		const Eigen::Quaterniond rotation(Rotation(0, yaw * Degrees));
+		Check(std::abs(spacememory::DriftYawDegrees(VrQ(rotation)) - yaw) < 1e-10,
+			yaw > 0 ? "positive 170 degree drift yaw must retain its angle" : "negative 170 degree drift yaw must retain its angle");
+		Check(std::abs(spacememory::DriftYawDegrees(VrQ(Eigen::Quaterniond(-rotation.coeffs()))) - yaw) < 1e-10,
+			yaw > 0 ? "negative quaternion sign must preserve positive 170 degree yaw" : "negative quaternion sign must preserve negative 170 degree yaw");
+	}
+	Check(spacememory::DriftYawDegrees({ 0, 0, -1, 0 }) == 180.0, "negative half-turn drift yaw must wrap to positive 180 degrees");
+}
+
 static void Benchmark()
 {
 	Hypothesis hypothesis;
@@ -1912,7 +2076,8 @@ int main(int argc, char **argv)
 		Scenario8, Scenario9, Scenario10, Scenario11, Scenario12, Scenario13, Scenario14, Scenario15, Scenario16, Scenario17,
 		Scenario18, Scenario19, Scenario20, Scenario21,
 		Scenario22, Scenario23, Scenario24, Scenario25, Scenario26, Scenario27, Scenario28, Scenario29, Scenario30,
-		Scenario31, Scenario32, Scenario33, Scenario34, Scenario35, Scenario36 };
+		Scenario31, Scenario32, Scenario33, Scenario34, Scenario35, Scenario36,
+		Scenario37, Scenario38, Scenario39, Scenario40, Scenario41 };
 	try
 	{
 		for (int i = 0; i < static_cast<int>(std::size(scenarios)); ++i)
