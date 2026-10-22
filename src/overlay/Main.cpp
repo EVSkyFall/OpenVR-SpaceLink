@@ -394,20 +394,16 @@ static auto HandleCommandLine(int argc, char** argv) -> void
 
     if (arg == "-openvrpath")
     {
-        auto vrErr = vr::VRInitError_None;
-        vr::VR_Init(&vrErr, vr::VRApplication_Utility);
-        if (vrErr == vr::VRInitError_None)
+        // Read from the path registry without connecting: a SteamVR server that is restarting
+        // would otherwise blank the path the installer needs to register the driver.
+        char runtimePath[1024] = { 0 };
+        unsigned int pathLen = 0;
+        if (vr::VR_GetRuntimePath(runtimePath, sizeof(runtimePath), &pathLen))
         {
-            char runtimePath[1024] = { 0 };
-            unsigned int pathLen = 0;
-            vr::VR_GetRuntimePath(runtimePath, sizeof(runtimePath), &pathLen);
-
             printf("%s", runtimePath);
-            vr::VR_Shutdown();
             exit(0);
         }
-        fprintf(stderr, "Failed to initialize OpenVR: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(vrErr));
-        vr::VR_Shutdown();
+        fprintf(stderr, "Failed to read the OpenVR runtime path\n");
         exit(-2);
     }
     else if (arg == "-installmanifest")
@@ -432,10 +428,15 @@ static auto HandleCommandLine(int argc, char** argv) -> void
             if (vrAppErr != vr::VRApplicationError_None)
                 fprintf(stderr, "Failed to add manifest: %s\n", vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr));
             else
-                vr::VRApplications()->SetApplicationAutoLaunch(APP_KEY, true);
+            {
+                vrAppErr = vr::VRApplications()->SetApplicationAutoLaunch(APP_KEY, true);
+                if (vrAppErr != vr::VRApplicationError_None)
+                    fprintf(stderr, "Failed to set autolaunch: %s\n", vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr));
+            }
 
+            // Non-zero so the installer tries again.
             vr::VR_Shutdown();
-            exit(0);
+            exit(vrAppErr == vr::VRApplicationError_None ? 0 : -3);
         }
         fprintf(stderr, "Failed to initialize OpenVR: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(vrErr));
         vr::VR_Shutdown();
@@ -447,13 +448,17 @@ static auto HandleCommandLine(int argc, char** argv) -> void
         vr::VR_Init(&vrErr, vr::VRApplication_Utility);
         if (vrErr == vr::VRInitError_None)
         {
+            auto vrAppErr = vr::VRApplicationError_None;
             if (vr::VRApplications()->IsApplicationInstalled(APP_KEY))
             {
                 std::string manifestPath = std::string(cwd) + "\\manifest.vrmanifest";
-                vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
+                vrAppErr = vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
+                if (vrAppErr != vr::VRApplicationError_None)
+                    fprintf(stderr, "Failed to remove manifest: %s\n", vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr));
             }
+            // Only a lost connection is worth another try; other errors, such as a manifest registered from another folder, would repeat.
             vr::VR_Shutdown();
-            exit(0);
+            exit(vrAppErr == vr::VRApplicationError_IPCFailed ? -3 : 0);
         }
         fprintf(stderr, "Failed to initialize OpenVR: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(vrErr));
         vr::VR_Shutdown();

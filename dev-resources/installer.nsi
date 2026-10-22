@@ -83,7 +83,8 @@ Function GetUninstallDirectory
 FunctionEnd
 
 ; Runs the overlay with the setup argument on the stack, again while it cannot reach SteamVR.
-Function RunSetupStep
+!macro RUN_SETUP_STEP_FUNCTION un
+Function ${un}RunSetupStep
     Exch $R0
     Push $R1
     Push $R2
@@ -102,6 +103,9 @@ Function RunSetupStep
     Pop $R1
     Pop $R0
 FunctionEnd
+!macroend
+!insertmacro RUN_SETUP_STEP_FUNCTION ""
+!insertmacro RUN_SETUP_STEP_FUNCTION "un."
 
 Function .onInit
     StrCpy $alreadyInstalled "false"
@@ -212,8 +216,8 @@ Section "Uninstall"
 	Pop $vrRuntimePath2
 	DetailPrint "VR runtime path: $vrRuntimePath2"
 
-	nsExec::ExecToLog '"$INSTDIR\OpenVR-SpaceOverride.exe" -removemanifest'
-	Pop $0
+    Push "-removemanifest"
+    Call un.RunSetupStep
     ExecWait '"$vrRuntimePath2\bin\win64\vrpathreg.exe" removedriver "$INSTDIR\driver"'
     SetOutPath "$TEMP"
 
