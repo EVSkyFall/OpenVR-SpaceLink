@@ -82,6 +82,27 @@ Function GetUninstallDirectory
     ${GetParent} "$R0" $R0
 FunctionEnd
 
+; Runs the overlay with the setup argument on the stack, again while it cannot reach SteamVR.
+Function RunSetupStep
+    Exch $R0
+    Push $R1
+    Push $R2
+    StrCpy $R1 0
+    retry:
+        nsExec::ExecToLog '"$INSTDIR\OpenVR-SpaceOverride.exe" $R0'
+        Pop $R2
+        StrCmp $R2 0 done
+        IntOp $R1 $R1 + 1
+        IntCmp $R1 10 done
+        DetailPrint "$R0 failed ($R2), trying again"
+        Sleep 2000
+        Goto retry
+    done:
+    Pop $R2
+    Pop $R1
+    Pop $R0
+FunctionEnd
+
 Function .onInit
     StrCpy $alreadyInstalled "false"
 
@@ -168,12 +189,14 @@ Section "Install" SecInstall
 
     CreateShortCut "$SMPROGRAMS\${DISPLAY_NAME}.lnk" "$INSTDIR\OpenVR-SpaceOverride.exe"
 
-    ExecWait '"$vrRuntimePath\bin\win64\vrpathreg.exe" adddriver "$INSTDIR\driver"'
+    ; Before adddriver: adding a driver makes a running SteamVR restart its server, and a step that
+    ; starts during the restart cannot connect, which once left SpaceLink unregistered as an app.
+    Push "-installmanifest"
+    Call RunSetupStep
+    Push "-activatemultipledrivers"
+    Call RunSetupStep
 
-	nsExec::ExecToLog '"$INSTDIR\OpenVR-SpaceOverride.exe" -installmanifest'
-	Pop $0
-	nsExec::ExecToLog '"$INSTDIR\OpenVR-SpaceOverride.exe" -activatemultipledrivers'
-	Pop $0
+    ExecWait '"$vrRuntimePath\bin\win64\vrpathreg.exe" adddriver "$INSTDIR\driver"'
 
 SectionEnd
 
