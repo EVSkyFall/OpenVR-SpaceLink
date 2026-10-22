@@ -107,6 +107,18 @@ FunctionEnd
 !insertmacro RUN_SETUP_STEP_FUNCTION ""
 !insertmacro RUN_SETUP_STEP_FUNCTION "un."
 
+; A SteamVR started from this elevated process (by a setup step, or by the restart that adddriver
+; triggers) runs elevated, and normal apps such as the overlay or a streamer cannot connect to it.
+; Everything is saved by now, so close it and let the user start SteamVR normally. The second pass
+; catches a server that the driverinstalled restart brings up a moment later.
+!macro CLOSE_STEAMVR
+    nsExec::Exec '"$SYSDIR\taskkill.exe" /F /T /IM vrmonitor.exe /IM vrserver.exe /IM vrcompositor.exe /IM vrdashboard.exe /IM vrwebhelper.exe /IM vrstartup.exe'
+    Pop $0
+    Sleep 2000
+    nsExec::Exec '"$SYSDIR\taskkill.exe" /F /T /IM vrmonitor.exe /IM vrserver.exe /IM vrcompositor.exe /IM vrdashboard.exe /IM vrwebhelper.exe /IM vrstartup.exe'
+    Pop $0
+!macroend
+
 Function .onInit
     StrCpy $alreadyInstalled "false"
 
@@ -202,6 +214,8 @@ Section "Install" SecInstall
 
     ExecWait '"$vrRuntimePath\bin\win64\vrpathreg.exe" adddriver "$INSTDIR\driver"'
 
+    !insertmacro CLOSE_STEAMVR
+
 SectionEnd
 
 ;--------------------------------
@@ -236,5 +250,7 @@ Section "Uninstall"
 
     Delete "$INSTDIR\Uninstall.exe"
     RMDir "$INSTDIR"
+
+    !insertmacro CLOSE_STEAMVR
 
 SectionEnd

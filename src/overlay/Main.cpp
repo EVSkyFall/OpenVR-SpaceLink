@@ -448,15 +448,12 @@ static auto HandleCommandLine(int argc, char** argv) -> void
         vr::VR_Init(&vrErr, vr::VRApplication_Utility);
         if (vrErr == vr::VRInitError_None)
         {
-            auto vrAppErr = vr::VRApplicationError_None;
-            if (vr::VRApplications()->IsApplicationInstalled(APP_KEY))
-            {
-                std::string manifestPath = std::string(cwd) + "\\manifest.vrmanifest";
-                vrAppErr = vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
-                if (vrAppErr != vr::VRApplicationError_None)
-                    fprintf(stderr, "Failed to remove manifest: %s\n", vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr));
-            }
-            // Only a lost connection is worth another try; other errors, such as a manifest registered from another folder, would repeat.
+            // No IsApplicationInstalled check first: it only answers yes or no, so a dropped connection would pass for "not installed".
+            std::string manifestPath = std::string(cwd) + "\\manifest.vrmanifest";
+            auto vrAppErr = vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
+            if (vrAppErr != vr::VRApplicationError_None)
+                fprintf(stderr, "Failed to remove manifest: %s\n", vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr));
+            // Only a lost connection is worth another try; other errors, such as a manifest that is not registered here, would repeat.
             vr::VR_Shutdown();
             exit(vrAppErr == vr::VRApplicationError_IPCFailed ? -3 : 0);
         }
